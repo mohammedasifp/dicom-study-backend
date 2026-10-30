@@ -1,6 +1,8 @@
 import PDFDocument from "pdfkit";
 import Report from "../models/Report.js";
 import Study from "../models/Study.js";
+import ReportImage from "../models/ReportImage.js";
+import { isValidObjectId } from "mongoose";
 import { emit } from "./events.js";
 import { TAGS, STUDY_STATUS } from "../constants/tags.js";
 import { HttpError } from "../utils/http.js";
@@ -10,7 +12,9 @@ const DECISION_TAGS = {
   accepted: TAGS.SUGGESTION_ACCEPTED,
   edited: TAGS.SUGGESTION_EDITED,
   discarded: TAGS.SUGGESTION_DISCARDED,
+  pending: TAGS.SUGGESTION_RESET,
 };
+const MAX_REASON = 500;
 
 export async function getReport(studyInstanceUid) {
   const report = await Report.findOne({ studyInstanceUid });
@@ -25,7 +29,7 @@ async function getDraft(studyInstanceUid) {
 }
 
 export async function decideSuggestion(studyInstanceUid, observationId, { decision, text, reviewer }) {
-  if (!DECISION_TAGS[decision]) throw new HttpError(400, "decision must be accepted, edited or discarded");
+  if (!DECISION_TAGS[decision]) throw new HttpError(400, "decision must be accepted, edited, discarded or pending");
   if (decision === "edited" && !text?.trim()) throw new HttpError(400, "text is required for an edited suggestion");
 
   const report = await getDraft(studyInstanceUid);
@@ -34,7 +38,7 @@ export async function decideSuggestion(studyInstanceUid, observationId, { decisi
 
   suggestion.decision = decision;
   suggestion.reviewerText = decision === "edited" ? text.trim() : undefined;
-  suggestion.decidedAt = new Date();
+  suggestion.decidedAt = decision === "pending" ? undefined : new Date();
   report.computedAuthorship = computeAuthorship(report);
   await report.save();
   await emit(DECISION_TAGS[decision], studyInstanceUid, { actor: "reviewer", payload: { observationId, reviewer } });
@@ -66,9 +70,11 @@ function parseAuthorship(value) {
   return { aiPercent, humanPercent, source: source?.trim() || undefined, recordedAt: new Date() };
 }
 
-export async function saveReport(studyInstanceUid, { findings, impression, reviewer, authorship }) {
+export async function saveReport(studyInstanceUid, { body, findings, impression, reviewer, authorship }) {
   const parsedAuthorship = parseAuthorship(authorship);
+  if (body !== undefined && body !== null && (typeof body !== "object" || Array.isArray(body))) throw new HttpError(400, "body must be the editor JSON object");
   const report = await getDraft(studyInstanceUid);
+  if (body !== undefined) report.body = body;
   updateSection(report.findings, findings);
   updateSection(report.impression, impression);
   if (reviewer) report.reviewer = reviewer;
@@ -95,12 +101,54 @@ export async function finaliseReport(studyInstanceUid, { reviewer, authorship })
   if (parsedAuthorship) report.authorship = parsedAuthorship;
   report.computedAuthorship = computeAuthorship(report);
   await report.save();
-  await Study.updateOne({ studyInstanceUid }, { status: STUDY_STATUS.REPORTED });
+  await Study.updateOne({ studyInstanceUid }, { status: STUDY_STATUS.REPORTED, reportedAt: report.finalisedAt });
   await emit(TAGS.REPORT_FINALISED, studyInstanceUid, {
     actor: "reviewer",
     payload: { reviewer: report.reviewer, authorship: report.authorship, computedAuthorship: report.computedAuthorship },
   });
   return report;
+}
+
+export async function reopenReport(studyInstanceUid, { reviewer, reason }) {
+  if (reason !== undefined && (typeof reason !== "string" || reason.length > MAX_REASON)) throw new HttpError(400, `reason must be text of at most ${MAX_REASON} characters`);
+  const report = await getReport(studyInstanceUid);
+  if (report.status !== "final") throw new HttpError(409, "Report is not finalised");
+
+  const reopenedAt = new Date();
+  report.history.push({ finalisedAt: report.finalisedAt, reviewer: report.reviewer, reopenedAt, reopenedBy: reviewer?.trim(), reason: reason?.trim() });
+  report.status = "draft";
+  report.finalisedAt = undefined;
+  await report.save();
+  await Study.updateOne({ studyInstanceUid }, { status: STUDY_STATUS.REPORT_PENDING, $unset: { reportedAt: 1 } });
+  await emit(TAGS.REPORT_REOPENED, studyInstanceUid, { actor: "reviewer", payload: { reviewer, reason } });
+  return report;
+}
+
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function fromDataUrl(dataUrl) {
+  const match = typeof dataUrl === "string" && /^data:([\w/+.-]+);base64,(.+)$/s.exec(dataUrl);
+  if (!match) throw new HttpError(400, "Send a multipart file or a base64 dataUrl");
+  return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
+}
+
+export async function addReportImage(studyInstanceUid, { file, dataUrl }) {
+  const { contentType, buffer } = file ? { contentType: file.mimetype, buffer: file.buffer } : fromDataUrl(dataUrl);
+  if (!IMAGE_TYPES.includes(contentType)) throw new HttpError(400, `Image type must be one of ${IMAGE_TYPES.join(", ")}`);
+  if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) throw new HttpError(400, "Image must be between 1 byte and 5 MB");
+  if (!(await Study.exists({ studyInstanceUid }))) throw new HttpError(404, "Study not found");
+
+  const image = await ReportImage.create({ studyInstanceUid, contentType, size: buffer.length, data: buffer });
+  const url = `/api/studies/${encodeURIComponent(studyInstanceUid)}/report/images/${image._id}`;
+  await emit(TAGS.REPORT_IMAGE_ADDED, studyInstanceUid, { actor: "reviewer", payload: { imageId: image._id, contentType, size: buffer.length } });
+  return { id: image._id, url, contentType, size: buffer.length };
+}
+
+export async function getReportImage(studyInstanceUid, imageId) {
+  const image = isValidObjectId(imageId) && (await ReportImage.findOne({ _id: imageId, studyInstanceUid }));
+  if (!image) throw new HttpError(404, "Image not found");
+  return image;
 }
 
 const SOURCE_LABEL = { ai: "AI-generated", reviewer_edited: "AI-generated, edited by reviewer", reviewer: "Written by reviewer" };
@@ -139,7 +187,8 @@ export async function writePdf(studyInstanceUid, res) {
     if (s.decision === "discarded") continue;
     const text = s.decision === "edited" ? s.reviewerText : s.aiText;
     const label = s.decision === "edited" ? "AI, edited by reviewer" : s.decision === "accepted" ? "AI, accepted" : "AI, pending review";
-    doc.text(`- ${text}  [${label}; confidence ${s.confidence ?? "-"}]`);
+    const image = s.instance ? `; series ${s.series}, image ${s.instance}` : "";
+    doc.text(`- ${text}  [${label}; confidence ${s.confidence ?? "-"}${image}]`);
   }
   const discarded = report.suggestions.filter((s) => s.decision === "discarded").length;
   if (discarded) doc.fillColor("gray").text(`${discarded} AI suggestion(s) discarded by reviewer.`).fillColor("black");

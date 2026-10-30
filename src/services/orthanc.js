@@ -19,7 +19,9 @@ export async function getStudy(orthancStudyId) {
   const series = await Promise.all(
     study.Series.map(async (id) => ({ ...(await json(`/series/${id}`)), instances: await json(`/series/${id}/instances`) }))
   );
-  return { study, patient, series };
+  const firstInstance = series.find((s) => s.instances.length)?.instances[0];
+  const instanceTags = firstInstance ? await json(`/instances/${firstInstance.ID}/simplified-tags`).catch(() => ({})) : {};
+  return { study, patient, series, instanceTags };
 }
 
 export function fromStableStudyPayload(body) {
@@ -31,6 +33,7 @@ export function fromStableStudyPayload(body) {
       MainDicomTags: s.tags || {},
       instances: (s.instances || []).map((i) => ({ ID: i.instanceId, MainDicomTags: i.tags || {} })),
     })),
+    instanceTags: body.series.find((s) => s.instances?.length)?.instances[0].dicomTags || {},
   };
 }
 

@@ -17,6 +17,7 @@ const seriesSchema = new mongoose.Schema(
     modality: String,
     bodyPart: String,
     description: String,
+    seriesNumber: Number,
     instances: [instanceSchema],
   },
   { _id: false }
@@ -30,9 +31,44 @@ const roiSchema = new mongoose.Schema(
     y: Number,
     width: Number,
     height: Number,
+    shape: { type: String, enum: ["rect", "ellipse"], default: "rect" },
+    imageWidth: Number,
+    imageHeight: Number,
   },
   { _id: false }
 );
+
+export const imageSourceSchema = new mongoose.Schema({ seriesInstanceUid: String, sopInstanceUid: String }, { _id: false });
+
+const observationSchema = new mongoose.Schema(
+  {
+    id: String,
+    section: { type: String, enum: ["findings", "impression"], default: "findings" },
+    title: String,
+    text: String,
+    confidence: Number,
+    localizable: Boolean,
+    limitation: String,
+    series: Number,
+    instance: Number,
+    source: imageSourceSchema,
+  },
+  { _id: false }
+);
+
+const aiFields = () => ({
+  mode: String,
+  requestedModel: String,
+  prompt: String,
+  model: { id: String, name: String, version: String },
+  observations: [observationSchema],
+  uncertainty: String,
+  limitations: [String],
+  rois: [roiSchema],
+  requestedAt: Date,
+  completedAt: Date,
+  error: String,
+});
 
 const studySchema = new mongoose.Schema(
   {
@@ -45,6 +81,12 @@ const studySchema = new mongoose.Schema(
     bodyPart: String,
     studyDate: String,
     description: String,
+    referringPhysician: String,
+    clinicalHistory: String,
+    technique: String,
+    priority: { type: String, enum: ["STAT", "URGENT", "ROUTINE"], default: "ROUTINE" },
+    patientClass: { type: String, enum: ["OP", "IP", "ER"], default: "OP" },
+    reportedAt: Date,
     series: [seriesSchema],
     status: { type: String, enum: Object.values(STUDY_STATUS), default: STUDY_STATUS.RECEIVED },
     viewed: {
@@ -60,19 +102,13 @@ const studySchema = new mongoose.Schema(
       dueAt: Date,
       overdueAt: Date,
     },
-    ai: {
-      mode: String,
-      requestedModel: String,
-      prompt: String,
-      model: { id: String, name: String, version: String },
-      observations: [{ id: String, text: String, confidence: Number, localizable: Boolean }],
-      uncertainty: String,
-      limitations: [String],
-      rois: [roiSchema],
-      requestedAt: Date,
-      completedAt: Date,
-      error: String,
+    assignment: {
+      radiologist: { type: mongoose.Schema.Types.ObjectId, ref: "Radiologist", index: true },
+      assignedAt: Date,
+      assignedBy: String,
     },
+    ai: aiFields(),
+    previousAi: aiFields(),
   },
   { timestamps: true }
 );

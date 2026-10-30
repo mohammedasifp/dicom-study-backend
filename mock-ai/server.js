@@ -19,25 +19,25 @@ const MODELS = [
 
 const TEMPLATES = {
   "cxr-findings-mock": [
-    { text: "Possible opacity in the right lower zone.", confidence: 0.72, localizable: true },
-    { text: "Cardiothoracic ratio within normal limits.", confidence: 0.88, localizable: false },
-    { text: "No obvious pleural effusion.", confidence: 0.81, localizable: false },
+    { title: "Right lower zone opacity", text: "Possible opacity in the right lower zone.", confidence: 0.72, localizable: true },
+    { title: "Cardiothoracic ratio", text: "Cardiothoracic ratio within normal limits.", confidence: 0.88, localizable: false },
+    { title: "Pleural effusion", text: "No obvious pleural effusion.", confidence: 0.81, localizable: false },
   ],
   "ct-segmentation-mock": [
-    { text: "Possible hypodense lesion in the liver, segment VI.", confidence: 0.64, localizable: true },
-    { text: "Kidneys normal in size and attenuation.", confidence: 0.86, localizable: false },
+    { title: "Liver segment VI lesion", text: "Possible hypodense lesion in the liver, segment VI.", confidence: 0.64, localizable: true },
+    { title: "Kidneys", text: "Kidneys normal in size and attenuation.", confidence: 0.86, localizable: false },
   ],
   "mr-brain-mock": [
-    { text: "Possible small T2 hyperintense focus in the left frontal white matter.", confidence: 0.58, localizable: true },
-    { text: "No midline shift.", confidence: 0.9, localizable: false },
+    { title: "Left frontal T2 focus", text: "Possible small T2 hyperintense focus in the left frontal white matter.", confidence: 0.58, localizable: true },
+    { title: "Midline shift", text: "No midline shift.", confidence: 0.9, localizable: false },
   ],
   "mr-msk-mock": [
-    { text: "Possible joint effusion.", confidence: 0.63, localizable: true },
-    { text: "No obvious fracture line.", confidence: 0.84, localizable: false },
+    { title: "Joint effusion", text: "Possible joint effusion.", confidence: 0.63, localizable: true },
+    { title: "Fracture", text: "No obvious fracture line.", confidence: 0.84, localizable: false },
   ],
   "us-abdomen-mock": [
-    { text: "Liver echotexture appears mildly increased.", confidence: 0.61, localizable: false },
-    { text: "Possible gallbladder calculus.", confidence: 0.55, localizable: true },
+    { title: "Liver echotexture", text: "Liver echotexture appears mildly increased.", confidence: 0.61, localizable: false },
+    { title: "Gallbladder calculus", text: "Possible gallbladder calculus.", confidence: 0.55, localizable: true },
   ],
 };
 
@@ -54,17 +54,23 @@ function resolveModel(meta) {
 }
 
 function buildResult(model, sopUids, prompt) {
-  const observations = TEMPLATES[model.id].map((o, i) => ({ id: `obs-${i + 1}`, ...o }));
+  const templates = [...TEMPLATES[model.id], { title: "Impression", text: "Findings as described. Correlate clinically.", confidence: 0.7, localizable: false, section: "impression" }];
+  const observations = templates.map((o, i) => ({
+    id: `obs-${i + 1}`,
+    section: "findings",
+    ...o,
+    source: sopUids.length ? { sopInstanceUid: sopUids[i % sopUids.length] } : undefined,
+    limitation: o.confidence < 0.6 ? "Low confidence. Confirm on the source image." : undefined,
+  }));
   const rois = observations
-    .filter((o) => o.localizable && sopUids.length)
-    .map((o, i) => ({ observationId: o.id, sopInstanceUid: sopUids[i % sopUids.length], x: 120, y: 140, width: 80, height: 64 }));
+    .filter((o) => o.localizable && o.source)
+    .map((o) => ({ observationId: o.id, sopInstanceUid: o.source.sopInstanceUid, shape: "rect", x: 120, y: 140, width: 80, height: 64, imageWidth: 512, imageHeight: 512 }));
   const { modalities: _m, ...modelInfo } = model;
   return {
     model: modelInfo,
     observations,
     rois,
-    findings: observations.map((o) => o.text).join(" "),
-    impression: "Findings as described. Correlate clinically. Radiologist review required.",
+    findings: "",
     uncertainty: "Mock model. Confidence values are synthetic and not calibrated.",
     limitations: ["Mock output for integration testing only.", `Analysed ${sopUids.length} instance(s).`, ...(prompt ? [`Additional instruction received: ${prompt}`] : [])],
   };

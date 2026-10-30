@@ -1,7 +1,8 @@
 import Study from "../models/Study.js";
-import Report from "../models/Report.js";
+import Report, { DRAFT_FIELDS } from "../models/Report.js";
 import Patient from "../models/Patient.js";
 import SyncState from "../models/SyncState.js";
+import Radiologist from "../models/Radiologist.js";
 import * as orthanc from "./orthanc.js";
 import { isValidObjectId } from "mongoose";
 import { analyze, listModels } from "./aiClient.js";
@@ -21,6 +22,17 @@ async function reject(studyInstanceUid, reason, orthancId) {
   return { studyInstanceUid, result: "rejected", reason };
 }
 
+const PRIORITY = { STAT: "STAT", HIGH: "URGENT", URGENT: "URGENT" };
+
+const personName = (value) => value?.replace(/\^+/g, " ").trim() || undefined;
+
+function technique(series) {
+  const views = [...new Set(series.map((s) => s.MainDicomTags.SeriesDescription).filter(Boolean))];
+  const images = series.reduce((n, s) => n + s.instances.length, 0);
+  const { Modality, BodyPartExamined } = series[0].MainDicomTags;
+  return `${Modality}${BodyPartExamined ? ` ${BodyPartExamined.toLowerCase()}` : ""}: ${series.length} series, ${images} images${views.length ? ` (${views.join(", ")})` : ""}.`;
+}
+
 let ingestQueue = Promise.resolve();
 
 function serial(fn) {
@@ -38,7 +50,7 @@ export function ingestPushedStudy(body) {
   return serial(() => saveOrthancStudy(body.studyId, orthanc.fromStableStudyPayload(body)));
 }
 
-async function saveOrthancStudy(orthancId, { study: o, patient: p, series }, { autoAnalyze = AUTO_ANALYZE } = {}) {
+async function saveOrthancStudy(orthancId, { study: o, patient: p, series, instanceTags = {} }, { autoAnalyze = AUTO_ANALYZE, force = false } = {}) {
   const uid = o.MainDicomTags.StudyInstanceUID;
   const pt = p.MainDicomTags;
 
@@ -57,7 +69,7 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series }, { a
 
   const study = (await Study.findOne({ studyInstanceUid: uid })) || new Study({ studyInstanceUid: uid });
   const isNew = study.isNew;
-  if (!isNew && o.LastUpdate && study.orthancId === orthancId && study.orthancLastUpdate === o.LastUpdate) {
+  if (!isNew && !force && o.LastUpdate && study.orthancId === orthancId && study.orthancLastUpdate === o.LastUpdate) {
     return { studyInstanceUid: uid, result: "unchanged", status: study.status };
   }
   Object.assign(study, {
@@ -67,6 +79,10 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series }, { a
     accessionNumber: o.MainDicomTags.AccessionNumber,
     studyDate: o.MainDicomTags.StudyDate,
     description: o.MainDicomTags.StudyDescription,
+    referringPhysician: personName(o.MainDicomTags.ReferringPhysicianName),
+    clinicalHistory: instanceTags.AdditionalPatientHistory?.trim() || undefined,
+    technique: technique(supported),
+    priority: PRIORITY[String(instanceTags.RequestedProcedurePriority || "").toUpperCase()] || "ROUTINE",
     modality: supported[0].MainDicomTags.Modality,
     bodyPart: supported[0].MainDicomTags.BodyPartExamined,
     series: supported.map((s) => ({
@@ -75,6 +91,7 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series }, { a
       modality: s.MainDicomTags.Modality,
       bodyPart: s.MainDicomTags.BodyPartExamined,
       description: s.MainDicomTags.SeriesDescription,
+      seriesNumber: Number(s.MainDicomTags.SeriesNumber) || undefined,
       instances: s.instances.map((i) => ({
         sopInstanceUid: i.MainDicomTags.SOPInstanceUID,
         instanceNumber: Number(i.MainDicomTags.InstanceNumber) || undefined,
@@ -135,20 +152,30 @@ export function summary(s) {
     patient: s.patient,
     accessionNumber: s.accessionNumber,
     studyDate: s.studyDate,
+    description: s.description,
     modality: s.modality,
     bodyPart: s.bodyPart,
+    referringPhysician: s.referringPhysician,
+    clinicalHistory: s.clinicalHistory,
+    technique: s.technique,
+    priority: s.priority,
+    patientClass: s.patientClass,
+    reportedAt: s.reportedAt,
     status: s.status,
     viewed: s.viewed,
     sla: s.sla,
+    assignment: s.assignment,
+    assignedTo: s.assignment?.radiologist ? String(s.assignment.radiologist._id ?? s.assignment.radiologist) : null,
     seriesCount: s.series.length,
     instanceCount: s.series.reduce((n, se) => n + se.instances.length, 0),
     model: s.ai?.model,
+    hasPreviousAi: !!s.previousAi?.completedAt,
     updatedAt: s.updatedAt,
   };
 }
 
 export async function getStudy(studyInstanceUid) {
-  const study = await Study.findOne({ studyInstanceUid }).populate("patient");
+  const study = await Study.findOne({ studyInstanceUid }).populate("patient").populate("assignment.radiologist");
   if (!study) throw new HttpError(404, "Study not found");
   return study;
 }
@@ -160,10 +187,52 @@ async function assertCanAnalyze(study) {
   }
 }
 
+const draftOf = (report) => ({ ...Object.fromEntries(DRAFT_FIELDS.map((f) => [f, report[f]])), savedAt: new Date() });
+
+async function snapshotDraft(studyInstanceUid) {
+  const report = await Report.findOne({ studyInstanceUid });
+  if (!report?.suggestions.length) return;
+  report.previous = draftOf(report.toObject());
+  await report.save();
+}
+
+export async function rollbackAi(studyInstanceUid, { rolledBackBy } = {}) {
+  const study = await getStudy(studyInstanceUid);
+  if (!study.previousAi?.completedAt) throw new HttpError(409, "No previous AI output to roll back to");
+  await assertCanAnalyze(study);
+
+  const { ai: current, previousAi: previous } = study.toObject();
+  const currentDone = !!current?.completedAt;
+  study.ai = previous;
+  study.previousAi = currentDone ? current : undefined;
+  study.status = STUDY_STATUS.REPORT_PENDING;
+  await study.save();
+
+  const report = await Report.findOne({ studyInstanceUid });
+  if (report?.previous?.savedAt) {
+    const doc = report.toObject();
+    for (const f of DRAFT_FIELDS) report.set(f, doc.previous[f]);
+    report.previous = currentDone ? draftOf(doc) : undefined;
+    await report.save();
+  } else {
+    await createDraft(study, study.ai);
+  }
+
+  await emit(TAGS.AI_ROLLED_BACK, studyInstanceUid, {
+    actor: "webapp",
+    payload: { rolledBackBy, restoredModel: previous.model?.id, replacedModel: current?.model?.id },
+  });
+  return summary(study);
+}
+
 export async function startAnalysis(studyInstanceUid, mode, { model: requestedModel, prompt } = {}) {
   const study = await getStudy(studyInstanceUid);
   await assertCanAnalyze(study);
 
+  if (study.ai?.completedAt) {
+    study.previousAi = study.toObject().ai;
+    await snapshotDraft(studyInstanceUid);
+  }
   study.status = STUDY_STATUS.AI_PROCESSING;
   study.ai = { mode, requestedModel, prompt, requestedAt: new Date() };
   await study.save();
@@ -184,7 +253,7 @@ export async function retryStudy(id, { mode, model, prompt }) {
   }
 
   try {
-    await ingestOrthancStudy(found.orthancId, { autoAnalyze: false });
+    await ingestOrthancStudy(found.orthancId, { autoAnalyze: false, force: true });
   } catch (err) {
     throw new HttpError(502, `Could not re-fetch the study from Orthanc: ${err.message}`);
   }
@@ -197,6 +266,10 @@ async function runAnalysis(study, mode, options) {
     const result = await analyze(study, mode, options, (progress) =>
       emit(mode === "stream" ? TAGS.AI_STREAM_CHUNK : TAGS.AI_CHUNK_SENT, uid, { actor: "ai", payload: progress })
     );
+    const seriesOf = new Map(study.series.flatMap((s) => s.instances.map((i) => [i.sopInstanceUid, s.seriesInstanceUid])));
+    for (const o of result.observations) {
+      if (o.source?.sopInstanceUid) o.source.seriesInstanceUid ??= seriesOf.get(o.source.sopInstanceUid);
+    }
 
     study.ai = { mode, requestedModel: options.model, prompt: options.prompt, requestedAt: study.ai.requestedAt, ...result, completedAt: new Date() };
     study.status = STUDY_STATUS.REPORT_PENDING;
@@ -217,9 +290,20 @@ async function runAnalysis(study, mode, options) {
 }
 
 function createDraft(study, result) {
-  const suggestions = result.observations.map((o) => ({ observationId: o.id, aiText: o.text, confidence: o.confidence }));
-  const findings = { aiText: result.findings, text: result.findings, source: "ai" };
-  const impression = { aiText: result.impression, text: result.impression, source: "ai" };
+  const suggestions = result.observations.map((o) => ({
+    observationId: o.id,
+    aiText: o.text,
+    section: o.section,
+    title: o.title,
+    limitation: o.limitation,
+    confidence: o.confidence,
+    series: o.series,
+    instance: o.instance,
+    source: o.source,
+  }));
+  const impressionText = suggestions.some((s) => s.section === "impression") ? "" : result.impression || "";
+  const findings = { aiText: result.findings || "", text: result.findings || "", source: "ai" };
+  const impression = { aiText: impressionText, text: impressionText, source: "ai" };
   return Report.findOneAndUpdate(
     { studyInstanceUid: study.studyInstanceUid },
     {
@@ -235,7 +319,7 @@ function createDraft(study, result) {
       limitations: result.limitations,
       disclaimer: DISCLAIMER,
       status: "draft",
-      $unset: { reviewer: 1, finalisedAt: 1, authorship: 1 },
+      $unset: { reviewer: 1, finalisedAt: 1, authorship: 1, body: 1 },
     },
     { upsert: true, returnDocument: "after" }
   );
@@ -269,14 +353,62 @@ export async function flagNotViewed() {
   }
 }
 
-export async function setSla(studyInstanceUid, { minutes, setBy }) {
-  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) throw new HttpError(400, "minutes must be a number above 0");
+function assertMinutes(minutes, field) {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) throw new HttpError(400, `${field} must be a number above 0`);
+}
+
+async function getOpenStudy(studyInstanceUid) {
   const study = await getStudy(studyInstanceUid);
   if (study.status === STUDY_STATUS.REPORTED) throw new HttpError(409, "Report already finalised");
+  return study;
+}
+
+function applySla(study, minutes, setBy) {
   const setAt = new Date();
   study.sla = { minutes, setAt, setBy, dueAt: new Date(setAt.getTime() + minutes * 60 * 1000) };
+}
+
+function emitSlaSet(study) {
+  const { minutes, dueAt, setBy } = study.sla;
+  return emit(TAGS.SLA_SET, study.studyInstanceUid, { actor: "webapp", payload: { minutes, dueAt, setBy } });
+}
+
+export async function setSla(studyInstanceUid, { minutes, setBy }) {
+  assertMinutes(minutes, "minutes");
+  const study = await getOpenStudy(studyInstanceUid);
+  applySla(study, minutes, setBy);
   await study.save();
-  await emit(TAGS.SLA_SET, studyInstanceUid, { actor: "webapp", payload: { minutes, dueAt: study.sla.dueAt, setBy } });
+  await emitSlaSet(study);
+  return summary(study);
+}
+
+async function unassignRadiologist(studyInstanceUid, unassignedBy) {
+  const study = await getOpenStudy(studyInstanceUid);
+  const previous = study.assignment?.radiologist?._id;
+  study.assignment = undefined;
+  await study.save();
+  await emit(TAGS.RADIOLOGIST_UNASSIGNED, studyInstanceUid, { actor: "webapp", payload: { radiologistId: previous, unassignedBy } });
+  return summary(study);
+}
+
+export async function assignRadiologist(studyInstanceUid, { radiologistId, tatMinutes, assignedBy }) {
+  if (radiologistId === null) return unassignRadiologist(studyInstanceUid, assignedBy);
+  if (!isValidObjectId(radiologistId)) throw new HttpError(400, "radiologistId must be a radiologist id");
+  if (tatMinutes !== undefined) assertMinutes(tatMinutes, "tatMinutes");
+  const radiologist = await Radiologist.findById(radiologistId);
+  if (!radiologist) throw new HttpError(404, "Radiologist not found");
+  if (radiologist.status !== "ACTIVE") throw new HttpError(400, "Radiologist is not active");
+  const study = await getOpenStudy(studyInstanceUid);
+
+  study.assignment = { radiologist: radiologist._id, assignedAt: new Date(), assignedBy };
+  if (tatMinutes !== undefined) applySla(study, tatMinutes, assignedBy);
+  await study.save();
+  await emit(TAGS.RADIOLOGIST_ASSIGNED, studyInstanceUid, {
+    actor: "webapp",
+    payload: { radiologistId: radiologist._id, name: radiologist.name, assignedBy, tatMinutes },
+  });
+  if (tatMinutes !== undefined) await emitSlaSet(study);
+  study.assignment.radiologist = radiologist;
   return summary(study);
 }
 
