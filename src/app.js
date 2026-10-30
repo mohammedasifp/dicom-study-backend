@@ -7,6 +7,7 @@ import studiesRouter from "./routes/studies.js";
 import eventsRouter from "./routes/events.js";
 import patientsRouter from "./routes/patients.js";
 import radiologistsRouter, { authRouter, currentRadiologist } from "./routes/radiologists.js";
+import opsRouter from "./routes/ops.js";
 import { listModels } from "./services/aiClient.js";
 import { aiUsage } from "./services/aiGuard.js";
 import { ingestPushedStudy } from "./services/studies.js";
@@ -41,6 +42,7 @@ app.use("/api/studies", studiesRouter);
 app.use("/api/events", eventsRouter);
 app.use("/api/patients", patientsRouter);
 app.use("/api/radiologists", radiologistsRouter);
+app.use("/api/ops", opsRouter);
 app.get("/api/me", currentRadiologist);
 app.get("/api/ai/limits", async (req, res) => ok(res, await aiUsage()));
 app.get("/api/models", async (req, res) => {

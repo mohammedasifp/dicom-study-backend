@@ -77,6 +77,13 @@ MongoDB creates the database and its collections when the first study arrives fr
 | `MOCK_AI_PORT` | `4100` | Mock AI port |
 | `MOCK_AI_DELAY_MS` | `300` | Mock AI delay between streamed observations |
 | `AUTH_SECRET` | (development secret) | Secret that signs the sign-in tokens. Without it the backend uses a fixed development secret and logs a warning. Set it outside local dev. |
+| `SIM_ENABLED` | `true` | Run the operations simulator in the backend. `false` turns it off; live studies are still monitored. See Operations. |
+| `SIM_PATIENTS` | `50` | Simulated patients created when the simulator starts with none |
+| `SIM_FAULT_EVERY_MINUTES` | `5` | The simulator injects one random failure this often. `0` turns automatic failures off. |
+| `SIM_TICK_MS` | `20000` | Operations simulator: time between steps |
+| `SIM_ADVANCE_PER_TICK` | `2` | Operations simulator: simulated patients moved one stage per step |
+| `OPS_SCAN_GRACE_MINUTES` / `OPS_PACS_GRACE_MINUTES` / `OPS_PARTIAL_GRACE_MINUTES` / `OPS_NOT_VIEWED_MINUTES` / `OPS_DELIVERY_GRACE_MINUTES` | `30` / `15` / `10` / `30` / `60` | Exception rule thresholds. See Operations. |
+| `OPS_TIME_ZONE` | `Asia/Kolkata` | Time zone of the clock times in exception descriptions |
 | `SEED_PASSWORD` | (none: a random password per radiologist) | When set, `npm run seed` gives all 4 test radiologists this password |
 
 ## Auth (password sign-in)
@@ -165,6 +172,8 @@ A new seeded row starts `ACTIVE`. A second run updates the rows, resets the pass
 | `radiologists` | One row per radiologist: name (required), `username` (optional, unique, lowercased, used to sign in), `passwordHash` (scrypt `salt:hash`, never returned), email (optional, unique, lowercased), designation, subspecialty, modalities (from CR, DX, CT, MR, US) | `ACTIVE`, `INACTIVE` |
 | `events` | Audit and notification log: tag, study, actor, payload | (the tag) |
 | `syncstates` | The last Orthanc change number that was processed | â€” |
+| `centrecases` | One row per simulated patient (Operations): `caseNumber` (`SIM-001`), patient, accession, modality, description, priority, `stage`, a timestamp per stage (`registeredAt`, `scheduledAt`, `acquiredAt`, `pacsAt`, `viewedAt`, `reportedAt`, `deliveredAt`), `dueAt`, `expectedImages` / `receivedImages`, `pacsPatient` (the ID and name the images carry), `fault` (the injected failure) | `REGISTERED`, `ACQUIRED`, `IN_PACS`, `REPORTED`, `DELIVERED` |
+| `opsexceptions` | One row per detected problem: `type`, `severity`, `stage` (impacted workflow stage), `caseStage`, `ref` (`case` + case number, or `study` + StudyInstanceUID), patient, `startedAt`, `detectedAt`, `detail`, `actions` (suggested steps), `owner` (suggested team), `assignee`, acknowledge / resolve fields, `resolutionNote`, `clearedAt`, `history` | `OPEN`, `ACKNOWLEDGED`, `RESOLVED` |
 
 The same patient can come back for a new visit. Each visit's study links to the same `patients` row.
 
@@ -221,8 +230,15 @@ All JSON responses use `{ code, message, data }`. `code` is `0` on success and `
 | `POST` | `/api/auth/login` | Sign in. Body: `{ username, password }`, both required (`400`). Reply `{ token, user }`, and set the `sb_session` cookie. `token` is a signed token valid for 12 hours. `user` has the list shape, without `passwordHash`. `401` "Invalid username or password" for a wrong username, a wrong password or an inactive radiologist. See Auth. |
 | `POST` | `/api/auth/logout` | Reply ok and clear the `sb_session` cookie. Nothing is stored on the server. The token stays valid until it expires. |
 | `GET` | `/api/me` | The signed-in radiologist, same shape as the list. Header `Authorization: Bearer <token>`. `401` "Sign in first" without a token. `401` "Session is not valid" for a forged or expired token, or an unknown or inactive radiologist. Changed 30/10/26: the `X-User-Id` header and the oldest-active fallback are gone. |
+| `GET` | `/api/ops/dashboard` | Operations dashboard: `stages` (per case stage: `count` of simulated patients and live studies, `openExceptions`), `exceptions` (open, acknowledged and resolved today, most urgent first), `counts` (`open`, `acknowledged`, `resolvedToday`, `bySeverity`, `unassigned`), `feed` (last 25 stage changes and exception events), `disclaimer`. Added 30/10/26. |
+| `GET` | `/api/ops/summary` | End-of-day summary since local midnight: `exceptions` (raised, resolved, open, by type, by severity, average minutes to acknowledge and to resolve), `throughput` (reports signed and delivered, average turnaround), `sla` (within target / total / percent), `stages`, `carryOver` (top 10 open), `insights` (sentences), `disclaimer` |
+| `POST` | `/api/ops/simulation/start` | Not in the webapp. Restart the simulator from scratch. Body: `{ "count": 50 }` (5 to 200, default `SIM_PATIENTS`). Deletes all simulated patients and their exceptions first; live studies are not touched. `400` for a bad count. |
+| `POST` | `/api/ops/simulation/inject` | Not in the webapp: for a live demo. Inject failures now. Body: `{ "types": ["MISSED_SCAN"] }` (optional; default: missed scan, images not in PACS, ID mismatch, not viewed, report overdue). Each type goes into a different healthy patient. Reply: `[{ type, caseNumber, patient }]`. `400` for an unknown type, `409` when the simulator has no patients or no healthy patient is left. |
+| `POST` | `/api/ops/exceptions/:id/acknowledge` | Acknowledge. `409` if already resolved. |
+| `PUT` | `/api/ops/exceptions/:id/assignee` | Assign to a staff member. Body: `{ "radiologistId": "..." }`. Also acknowledges an open exception. `400` bad or inactive id, `404` unknown id, `409` resolved. |
+| `POST` | `/api/ops/exceptions/:id/resolve` | Resolve. Body: `{ "note": "what was done" }`, 3 to 500 characters (`400`). Acknowledges first if needed. `409` if already resolved. For a simulated patient, the fix is applied to the patient so it moves on. |
 | `GET` | `/api/events` | Poll events. Query: `?since=<eventId>`, `?studyInstanceUid=` |
-| `GET` | `/api/events/stream` | SSE stream. Pushes `AI_COMPLETED` and `REPORT_OVERDUE`. After a reconnect, it replays the messages of both tags missed since `Last-Event-ID` or `?since=` |
+| `GET` | `/api/events/stream` | SSE stream. Pushes `AI_COMPLETED`, `REPORT_OVERDUE` and the operations tags. After a reconnect, it replays the messages of both tags missed since `Last-Event-ID` or `?since=` |
 | `GET` | `/api/events/tags` | All event tags (read-only list, for display in the webapp) |
 | `GET` | `/health` | Liveness and database state |
 
@@ -249,9 +265,9 @@ Each report holds two values. The decision on which one to use is open (29/10/26
 
 ## Event tags
 
-`STUDY_RECEIVED`, `STUDY_REJECTED`, `AI_REQUESTED`, `AI_STREAM_CHUNK`, `AI_CHUNK_SENT`, `AI_COMPLETED`, `AI_FAILED`, `REPORT_PENDING`, `SCAN_VIEWED`, `SCAN_NOT_VIEWED`, `SUGGESTION_ACCEPTED`, `SUGGESTION_EDITED`, `SUGGESTION_DISCARDED`, `REPORT_SAVED`, `REPORT_FINALISED`, `REPORT_EXPORTED`, `SLA_SET`, `REPORT_OVERDUE`, `RADIOLOGIST_ASSIGNED`, `RADIOLOGIST_UNASSIGNED`, `SUGGESTION_RESET`, `REPORT_REOPENED`, `REPORT_IMAGE_ADDED`, `AI_ROLLED_BACK`
+`STUDY_RECEIVED`, `STUDY_REJECTED`, `AI_REQUESTED`, `AI_STREAM_CHUNK`, `AI_CHUNK_SENT`, `AI_COMPLETED`, `AI_FAILED`, `REPORT_PENDING`, `SCAN_VIEWED`, `SCAN_NOT_VIEWED`, `SUGGESTION_ACCEPTED`, `SUGGESTION_EDITED`, `SUGGESTION_DISCARDED`, `REPORT_SAVED`, `REPORT_FINALISED`, `REPORT_EXPORTED`, `SLA_SET`, `REPORT_OVERDUE`, `RADIOLOGIST_ASSIGNED`, `RADIOLOGIST_UNASSIGNED`, `SUGGESTION_RESET`, `REPORT_REOPENED`, `REPORT_IMAGE_ADDED`, `AI_ROLLED_BACK`, `STUDY_DELETED`, and for Operations `SIM_STARTED`, `SIM_FAULT_INJECTED`, `CASE_STAGE_CHANGED`, `OPS_EXCEPTION_RAISED`, `OPS_EXCEPTION_ACKNOWLEDGED`, `OPS_EXCEPTION_ASSIGNED`, `OPS_EXCEPTION_RESOLVED`, `OPS_EXCEPTION_CLEARED`
 
-Only backend code sets tags, on each action. All of them go to the `events` log. Only `AI_COMPLETED` and `REPORT_OVERDUE` are pushed over SSE.
+Only backend code sets tags, on each action. All of them go to the `events` log. `AI_COMPLETED`, `REPORT_OVERDUE` and the Operations tags are pushed over SSE.
 
 ## AI guard rails
 
@@ -265,6 +281,30 @@ Changed 30/10/26. Code: `src/services/aiGuard.js`. Checked before every analysis
 - A blocked **automatic** analysis (a new study from Orthanc) does not fail the push: the study becomes `AI_FAILED` with the reason as `ai.error`, and the radiologist can report manually or run the AI later.
 - Also: prompts at most 2000 characters, at most 4 images per dr7 analysis, `DR7_MAX_TOKENS` and `DR7_TIMEOUT_MS` per call.
 
+## Operations (simulated centre and exceptions)
+
+Added 30/10/26. Code: `src/services/simulator.js`, `opsExceptions.js`, `opsReport.js`, `src/constants/ops.js`. Webapp: the **Operations** page.
+
+**Simulator.** Runs inside the backend; staff never see or control it. With `SIM_ENABLED` (default on), the backend starts it at boot: if there are no simulated patients it creates `SIM_PATIENTS`, spread over the five stages (registered, scanned, in PACS, reported, delivered), all healthy. Every `SIM_TICK_MS` it moves the `SIM_ADVANCE_PER_TICK` patients that have waited longest one stage on (in PACS takes two steps: viewed, then reported) and emits `CASE_STAGE_CHANGED`. Beyond 10 delivered patients, the oldest is replaced by a new registration, so the centre keeps flowing. Every `SIM_FAULT_EVERY_MINUTES` it injects one random failure into a healthy patient. A patient with a failure does not move until staff resolve it.
+
+To inject failures on demand (live demo), signed in: `POST /api/ops/simulation/inject` with `{}` for the default five, or `{ "types": ["ID_MISMATCH"] }`.
+
+**Rules.** Run every `WATCH_INTERVAL_MS`, after every simulator step and after each injection. Simulated patients and live Orthanc studies are both checked:
+
+| Type | Raised when | Impacted stage | Base severity |
+|---|---|---|---|
+| `MISSED_SCAN` | Registered, and the booked time is `OPS_SCAN_GRACE_MINUTES` past with no scan | Acquisition | High |
+| `PACS_TRANSFER_STUCK` | Scanned, and no images in PACS after `OPS_PACS_GRACE_MINUTES` | PACS transfer | High |
+| `PARTIAL_TRANSFER` | In PACS with fewer images than acquired, after `OPS_PARTIAL_GRACE_MINUTES` | PACS transfer | Medium |
+| `ID_MISMATCH` | The patient ID or name on the images differs from the order | PACS transfer | Critical |
+| `NOT_VIEWED` | In PACS and not opened after `OPS_NOT_VIEWED_MINUTES`. Live studies: the existing `SCAN_NOT_VIEWED` flag. | Reporting | Medium |
+| `REPORT_OVERDUE` | Past the report due time. Live studies: `sla.dueAt`. Simulated targets: STAT 60 min, urgent 240, routine 24 h from arrival in PACS. | Reporting | High |
+| `DELIVERY_PENDING` | Reported, and not delivered after `OPS_DELIVERY_GRACE_MINUTES` | Delivery | Low |
+
+Severity goes up one level for STAT, and one more once the problem is older than the type's `escalateAfter` (in `constants/ops.js`); it is re-checked on every pass. One exception per patient and type while it is open. A resolved live-study exception is never raised again for that study. When the problem stops being detected before anyone resolves it, the exception gets `clearedAt` and stays open: staff still resolve it.
+
+**Human in the loop.** The rules only raise exceptions with a description and suggested steps. Nothing changes until a person acknowledges, assigns or resolves, and resolving needs a note. Every reply carries the disclaimer.
+
 ## Logs
 
 - `[ORTHANC] push received: …`, then `[ORTHANC] <push|poll|retry>: study <uid> created|updated|unchanged|rejected …` with patient, modality, series and instance counts, and whether the AI started.
@@ -273,6 +313,8 @@ Changed 30/10/26. Code: `src/services/aiGuard.js`. Checked before every analysis
 - `[AI] study <uid> started|done|failed …`, `[AI] study <uid> not analysed: <guard reason>`.
 - `[AI] dr7 <model>: <in> in + <out> out tokens, about $<cost>; credit left $<credit>` for each dr7 call. The cost uses the per-1K prices in `dr7Client.js` (dr7.ai/pricing, 30/10/26).
 - `[STUDY] <uid> deleted by <name>`.
+- `[SIM] started with <n> patients by <name>`, `[SIM] running with <n> patients, a failure every <m> min` (after a restart), `[SIM] injected <type> into <case>`, `[SIM] off (SIM_ENABLED=false)`.
+- `[OPS] <severity> <type> raised for case|study <id> (<patient>)`, `[OPS] <type> for case|study <id> resolved by <name>`.
 
 ## AI providers
 
