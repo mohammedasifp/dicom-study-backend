@@ -1,5 +1,7 @@
 import { getInstanceFile } from "./orthanc.js";
+import * as dr7 from "./dr7Client.js";
 
+const USE_DR7 = process.env.AI_PROVIDER === "dr7";
 const AI_BASE_URL = process.env.AI_BASE_URL || "http://localhost:4100";
 const CHUNK_SIZE = Number(process.env.AI_CHUNK_SIZE) || 5;
 
@@ -82,9 +84,11 @@ async function analyzeChunked(study, options, onProgress) {
 }
 
 export function analyze(study, mode, options, onProgress) {
+  if (USE_DR7) return dr7.analyze(study, mode, options, onProgress);
   return mode === "stream" ? analyzeStream(study, options, onProgress) : analyzeChunked(study, options, onProgress);
 }
 
 export async function listModels() {
+  if (USE_DR7) return dr7.listModels();
   return (await ensureOk(await fetch(`${AI_BASE_URL}/v1/models`))).json();
 }

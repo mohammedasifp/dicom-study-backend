@@ -1,6 +1,6 @@
 import { Router } from "express";
 import Study from "../models/Study.js";
-import { syncFromOrthanc, getStudy, startAnalysis, retryStudy, markViewed, summary, viewerUrl, DEFAULT_MODE } from "../services/studies.js";
+import { syncFromOrthanc, getStudy, startAnalysis, retryStudy, markViewed, setSla, summary, viewerUrl, DEFAULT_MODE } from "../services/studies.js";
 import { getReport, decideSuggestion, saveReport, finaliseReport, writePdf } from "../services/reports.js";
 import { AI_MODES } from "../constants/tags.js";
 import { ok, HttpError } from "../utils/http.js";
@@ -42,6 +42,8 @@ router.post("/:id/retry", async (req, res) =>
 );
 
 router.put("/:uid/viewed", async (req, res) => ok(res, await markViewed(req.params.uid, req.body?.viewedBy)));
+
+router.put("/:uid/sla", async (req, res) => ok(res, await setSla(req.params.uid, req.body || {}), "sla set"));
 
 router.get("/:uid/report", async (req, res) => {
   const study = await getStudy(req.params.uid);

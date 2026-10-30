@@ -18,10 +18,27 @@ export const DEFAULT_MODE = AI_MODES.includes(process.env.AI_MODE) ? process.env
 async function reject(studyInstanceUid, reason, orthancId) {
   console.warn(`[ORTHANC] rejected study ${studyInstanceUid || orthancId}: ${reason}`);
   await emit(TAGS.STUDY_REJECTED, studyInstanceUid, { actor: "server", payload: { orthancId, reason } });
+  return { studyInstanceUid, result: "rejected", reason };
 }
 
-export async function ingestOrthancStudy(orthancId, { autoAnalyze = AUTO_ANALYZE } = {}) {
-  const { study: o, patient: p, series } = await orthanc.getStudy(orthancId);
+let ingestQueue = Promise.resolve();
+
+function serial(fn) {
+  const run = ingestQueue.then(fn);
+  ingestQueue = run.catch(() => {});
+  return run;
+}
+
+export async function ingestOrthancStudy(orthancId, options) {
+  return serial(async () => saveOrthancStudy(orthancId, await orthanc.getStudy(orthancId), options));
+}
+
+export function ingestPushedStudy(body) {
+  if (!body?.studyId || !Array.isArray(body.series)) throw new HttpError(400, "Expected the Orthanc stable-study payload");
+  return serial(() => saveOrthancStudy(body.studyId, orthanc.fromStableStudyPayload(body)));
+}
+
+async function saveOrthancStudy(orthancId, { study: o, patient: p, series }, { autoAnalyze = AUTO_ANALYZE } = {}) {
   const uid = o.MainDicomTags.StudyInstanceUID;
   const pt = p.MainDicomTags;
 
@@ -40,8 +57,12 @@ export async function ingestOrthancStudy(orthancId, { autoAnalyze = AUTO_ANALYZE
 
   const study = (await Study.findOne({ studyInstanceUid: uid })) || new Study({ studyInstanceUid: uid });
   const isNew = study.isNew;
+  if (!isNew && o.LastUpdate && study.orthancId === orthancId && study.orthancLastUpdate === o.LastUpdate) {
+    return { studyInstanceUid: uid, result: "unchanged", status: study.status };
+  }
   Object.assign(study, {
     orthancId,
+    orthancLastUpdate: o.LastUpdate,
     patient: patient._id,
     accessionNumber: o.MainDicomTags.AccessionNumber,
     studyDate: o.MainDicomTags.StudyDate,
@@ -68,7 +89,8 @@ export async function ingestOrthancStudy(orthancId, { autoAnalyze = AUTO_ANALYZE
     actor: "server",
     payload: { orthancId, modality: study.modality, seriesCount: study.series.length, instanceCount, isNew },
   });
-  if (isNew && autoAnalyze) await startAnalysis(uid, DEFAULT_MODE);
+  const started = isNew && autoAnalyze ? await startAnalysis(uid, DEFAULT_MODE) : null;
+  return { studyInstanceUid: uid, result: isNew ? "created" : "updated", status: started?.status ?? study.status };
 }
 
 let syncing = false;
@@ -89,8 +111,8 @@ export async function syncFromOrthanc() {
         const page = await orthanc.getChanges(state.lastSeq);
         for (const change of page.Changes) {
           if (change.ChangeType === "StableStudy") {
-            await ingestOrthancStudy(change.ID);
-            ingested++;
+            const { result } = await ingestOrthancStudy(change.ID);
+            if (result === "created" || result === "updated") ingested++;
           }
           state.lastSeq = change.Seq;
           await state.save();
@@ -117,6 +139,7 @@ export function summary(s) {
     bodyPart: s.bodyPart,
     status: s.status,
     viewed: s.viewed,
+    sla: s.sla,
     seriesCount: s.series.length,
     instanceCount: s.series.reduce((n, se) => n + se.instances.length, 0),
     model: s.ai?.model,
@@ -242,6 +265,32 @@ export async function flagNotViewed() {
     await study.save();
     await emit(TAGS.SCAN_NOT_VIEWED, study.studyInstanceUid, {
       payload: { minutesSinceAi: Math.round((Date.now() - study.ai.completedAt) / 60000) },
+    });
+  }
+}
+
+export async function setSla(studyInstanceUid, { minutes, setBy }) {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) throw new HttpError(400, "minutes must be a number above 0");
+  const study = await getStudy(studyInstanceUid);
+  if (study.status === STUDY_STATUS.REPORTED) throw new HttpError(409, "Report already finalised");
+  const setAt = new Date();
+  study.sla = { minutes, setAt, setBy, dueAt: new Date(setAt.getTime() + minutes * 60 * 1000) };
+  await study.save();
+  await emit(TAGS.SLA_SET, studyInstanceUid, { actor: "webapp", payload: { minutes, dueAt: study.sla.dueAt, setBy } });
+  return summary(study);
+}
+
+export async function flagOverdue() {
+  const due = await Study.find({
+    "sla.dueAt": { $lte: new Date() },
+    "sla.overdueAt": null,
+    status: { $ne: STUDY_STATUS.REPORTED },
+  });
+  for (const study of due) {
+    study.sla.overdueAt = new Date();
+    await study.save();
+    await emit(TAGS.REPORT_OVERDUE, study.studyInstanceUid, {
+      payload: { status: study.status, minutes: study.sla.minutes, dueAt: study.sla.dueAt, overdueAt: study.sla.overdueAt },
     });
   }
 }

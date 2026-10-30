@@ -3,8 +3,8 @@ const AUTH =
   process.env.ORTHANC_USERNAME &&
   "Basic " + Buffer.from(`${process.env.ORTHANC_USERNAME}:${process.env.ORTHANC_PASSWORD || ""}`).toString("base64");
 
-async function get(path) {
-  const res = await fetch(`${ORTHANC_URL}${path}`, { headers: AUTH ? { Authorization: AUTH } : {} });
+async function get(path, headers = {}) {
+  const res = await fetch(`${ORTHANC_URL}${path}`, { headers: AUTH ? { ...headers, Authorization: AUTH } : headers });
   if (!res.ok) throw new Error(`Orthanc ${path} -> ${res.status}`);
   return res;
 }
@@ -22,6 +22,22 @@ export async function getStudy(orthancStudyId) {
   return { study, patient, series };
 }
 
+export function fromStableStudyPayload(body) {
+  return {
+    study: { MainDicomTags: body.studyTags || {}, LastUpdate: body.lastUpdate },
+    patient: { MainDicomTags: body.patient?.tags || {} },
+    series: body.series.map((s) => ({
+      ID: s.seriesId,
+      MainDicomTags: s.tags || {},
+      instances: (s.instances || []).map((i) => ({ ID: i.instanceId, MainDicomTags: i.tags || {} })),
+    })),
+  };
+}
+
 export async function getInstanceFile(orthancInstanceId) {
   return (await get(`/instances/${orthancInstanceId}/file`)).arrayBuffer();
+}
+
+export async function getRenderedJpeg(orthancInstanceId, size = 768) {
+  return (await get(`/instances/${orthancInstanceId}/rendered?width=${size}&height=${size}`, { Accept: "image/jpeg" })).arrayBuffer();
 }

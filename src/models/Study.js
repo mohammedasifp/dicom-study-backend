@@ -38,6 +38,7 @@ const studySchema = new mongoose.Schema(
   {
     studyInstanceUid: { type: String, required: true, unique: true },
     orthancId: { type: String, required: true },
+    orthancLastUpdate: String,
     patient: { type: mongoose.Schema.Types.ObjectId, ref: "Patient", required: true, index: true },
     accessionNumber: String,
     modality: String,
@@ -51,6 +52,13 @@ const studySchema = new mongoose.Schema(
       viewedAt: Date,
       viewedBy: String,
       notViewedFlaggedAt: Date,
+    },
+    sla: {
+      minutes: Number,
+      setAt: Date,
+      setBy: String,
+      dueAt: Date,
+      overdueAt: Date,
     },
     ai: {
       mode: String,

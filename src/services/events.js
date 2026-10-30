@@ -1,7 +1,7 @@
 import Event from "../models/Event.js";
 import { TAGS } from "../constants/tags.js";
 
-export const PUSHED_TAGS = [TAGS.AI_COMPLETED];
+export const PUSHED_TAGS = [TAGS.AI_COMPLETED, TAGS.REPORT_OVERDUE];
 const clients = new Set();
 
 export function addClient(res) {

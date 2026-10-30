@@ -7,14 +7,22 @@ import studiesRouter from "./routes/studies.js";
 import eventsRouter from "./routes/events.js";
 import patientsRouter from "./routes/patients.js";
 import { listModels } from "./services/aiClient.js";
-import { ok } from "./utils/http.js";
+import { ingestPushedStudy } from "./services/studies.js";
+import { ok, HttpError } from "./utils/http.js";
 
 const app = express();
 
 app.use(helmet());
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
+
+app.post("/event/preregister", express.json({ limit: "50mb" }), async (req, res) => {
+  const result = await ingestPushedStudy(req.body);
+  if (result.result === "rejected") throw new HttpError(422, result.reason);
+  return ok(res, result, result.result);
+});
+
+app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", db: mongoose.connection.readyState === 1 ? "up" : "down" });
