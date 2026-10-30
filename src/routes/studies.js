@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { isValidObjectId } from "mongoose";
 import Study from "../models/Study.js";
-import { syncFromOrthanc, getStudy, startAnalysis, retryStudy, rollbackAi, markViewed, setSla, assignRadiologist, summary, viewerUrl, DEFAULT_MODE } from "../services/studies.js";
+import { syncFromOrthanc, getStudy, startAnalysis, retryStudy, rollbackAi, markViewed, setSla, assignRadiologist, deleteStudy, summary, reviewCounts, viewerUrl, DEFAULT_MODE } from "../services/studies.js";
 import multer from "multer";
 import { getReport, decideSuggestion, saveReport, finaliseReport, reopenReport, addReportImage, getReportImage, writePdf, MAX_IMAGE_BYTES } from "../services/reports.js";
 import { AI_MODES } from "../constants/tags.js";
@@ -36,13 +36,16 @@ router.get("/", async (req, res) => {
     filter["assignment.radiologist"] = req.query.radiologist;
   }
   const studies = await Study.find(filter).populate("patient").populate("assignment.radiologist").sort({ updatedAt: -1 }).limit(200).lean();
-  return ok(res, studies.map(summary));
+  const counts = await reviewCounts(studies.map((s) => s.studyInstanceUid));
+  return ok(res, studies.map((s) => summary(s, counts.get(s.studyInstanceUid))));
 });
 
 router.get("/:uid", async (req, res) => {
   const study = await getStudy(req.params.uid);
   return ok(res, { ...study.toObject(), viewerUrl: viewerUrl(study.studyInstanceUid) });
 });
+
+router.delete("/:uid", async (req, res) => ok(res, await deleteStudy(req.params.uid, actorName(req)), "deleted"));
 
 router.post("/:uid/analyze", async (req, res) => ok(res, await startAnalysis(req.params.uid, pickMode(req.body?.mode)), "analysis started", 202));
 
@@ -56,7 +59,11 @@ router.put("/:uid/viewed", async (req, res) => ok(res, await markViewed(req.para
 
 router.put("/:uid/sla", async (req, res) => ok(res, await setSla(req.params.uid, { ...req.body, setBy: actorName(req, req.body?.setBy) }), "sla set"));
 
-router.put("/:uid/assignment", async (req, res) => ok(res, await assignRadiologist(req.params.uid, { ...req.body, assignedBy: actorName(req, req.body?.assignedBy) }), "radiologist assigned"));
+router.put("/:uid/assignment", async (req, res) => {
+  const study = await assignRadiologist(req.params.uid, { ...req.body, assignedBy: actorName(req, req.body?.assignedBy) });
+  const counts = await reviewCounts([study.studyInstanceUid]);
+  return ok(res, { ...study, review: counts.get(study.studyInstanceUid) || null }, "radiologist assigned");
+});
 
 router.get("/:uid/report", async (req, res) => {
   const study = await getStudy(req.params.uid);

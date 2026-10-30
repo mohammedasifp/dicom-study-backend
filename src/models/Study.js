@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { STUDY_STATUS } from "../constants/tags.js";
+import { AI_FAILURE_REASON, STUDY_STATUS } from "../constants/tags.js";
 
 const instanceSchema = new mongoose.Schema(
   {
@@ -68,6 +68,7 @@ const aiFields = () => ({
   requestedAt: Date,
   completedAt: Date,
   error: String,
+  failureReason: { type: String, enum: Object.values(AI_FAILURE_REASON) },
 });
 
 const studySchema = new mongoose.Schema(

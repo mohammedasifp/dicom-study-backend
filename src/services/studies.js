@@ -1,23 +1,25 @@
 import Study from "../models/Study.js";
 import Report, { DRAFT_FIELDS } from "../models/Report.js";
 import Patient from "../models/Patient.js";
+import ReportImage from "../models/ReportImage.js";
 import SyncState from "../models/SyncState.js";
 import Radiologist from "../models/Radiologist.js";
 import * as orthanc from "./orthanc.js";
 import { isValidObjectId } from "mongoose";
 import { analyze, listModels } from "./aiClient.js";
+import { assertAiAllowed } from "./aiGuard.js";
 import { emit } from "./events.js";
-import { TAGS, STUDY_STATUS, SUPPORTED_MODALITIES, AI_MODES, DISCLAIMER } from "../constants/tags.js";
+import { TAGS, STUDY_STATUS, SUPPORTED_MODALITIES, AI_MODES, AI_FAILURE_REASON, DISCLAIMER } from "../constants/tags.js";
 import { HttpError } from "../utils/http.js";
 import { computeAuthorship } from "../utils/authorship.js";
 
-const OHIF_VIEWER_URL = process.env.OHIF_VIEWER_URL || "http://localhost:8042/ohif/viewer";
+const OHIF_VIEWER_URL = process.env.OHIF_VIEWER_URL || "/ohif/viewer";
 const NOT_VIEWED_MINUTES = Number(process.env.SCAN_NOT_VIEWED_MINUTES) || 15;
 const AUTO_ANALYZE = process.env.AUTO_ANALYZE !== "false";
 export const DEFAULT_MODE = AI_MODES.includes(process.env.AI_MODE) ? process.env.AI_MODE : "chunk";
 
-async function reject(studyInstanceUid, reason, orthancId) {
-  console.warn(`[ORTHANC] rejected study ${studyInstanceUid || orthancId}: ${reason}`);
+async function reject(studyInstanceUid, reason, orthancId, source = "poll") {
+  console.warn(`[ORTHANC] ${source}: rejected study ${studyInstanceUid || orthancId}: ${reason}`);
   await emit(TAGS.STUDY_REJECTED, studyInstanceUid, { actor: "server", payload: { orthancId, reason } });
   return { studyInstanceUid, result: "rejected", reason };
 }
@@ -47,18 +49,20 @@ export async function ingestOrthancStudy(orthancId, options) {
 
 export function ingestPushedStudy(body) {
   if (!body?.studyId || !Array.isArray(body.series)) throw new HttpError(400, "Expected the Orthanc stable-study payload");
-  return serial(() => saveOrthancStudy(body.studyId, orthanc.fromStableStudyPayload(body)));
+  const instances = body.series.reduce((n, s) => n + (s.instances?.length || 0), 0);
+  console.log(`[ORTHANC] push received: Orthanc study ${body.studyId}, ${body.series.length} series / ${instances} instances`);
+  return serial(() => saveOrthancStudy(body.studyId, orthanc.fromStableStudyPayload(body), { source: "push" }));
 }
 
-async function saveOrthancStudy(orthancId, { study: o, patient: p, series, instanceTags = {} }, { autoAnalyze = AUTO_ANALYZE, force = false } = {}) {
+async function saveOrthancStudy(orthancId, { study: o, patient: p, series, instanceTags = {} }, { autoAnalyze = AUTO_ANALYZE, force = false, source = "poll" } = {}) {
   const uid = o.MainDicomTags.StudyInstanceUID;
   const pt = p.MainDicomTags;
 
-  if (!pt.PatientID) return reject(uid, "Missing Patient ID", orthancId);
+  if (!pt.PatientID) return reject(uid, "Missing Patient ID", orthancId, source);
   const supported = series.filter((s) => SUPPORTED_MODALITIES.includes(s.MainDicomTags.Modality));
   if (!supported.length) {
     const found = [...new Set(series.map((s) => s.MainDicomTags.Modality))].join(", ");
-    return reject(uid, `No supported modality (found ${found})`, orthancId);
+    return reject(uid, `No supported modality (found ${found})`, orthancId, source);
   }
 
   const patient = await Patient.findOneAndUpdate(
@@ -70,6 +74,7 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series, insta
   const study = (await Study.findOne({ studyInstanceUid: uid })) || new Study({ studyInstanceUid: uid });
   const isNew = study.isNew;
   if (!isNew && !force && o.LastUpdate && study.orthancId === orthancId && study.orthancLastUpdate === o.LastUpdate) {
+    console.log(`[ORTHANC] ${source}: study ${uid} unchanged (${study.status})`);
     return { studyInstanceUid: uid, result: "unchanged", status: study.status };
   }
   Object.assign(study, {
@@ -107,7 +112,11 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series, insta
     actor: "server",
     payload: { orthancId, modality: study.modality, seriesCount: study.series.length, instanceCount, isNew },
   });
-  const started = isNew && autoAnalyze ? await startAnalysis(uid, DEFAULT_MODE) : null;
+  const started = isNew && autoAnalyze ? await startAnalysis(uid, DEFAULT_MODE, { auto: true }) : null;
+  console.log(
+    `[ORTHANC] ${source}: study ${uid} ${isNew ? "created" : "updated"}: ${personName(pt.PatientName) || "unknown"} (${pt.PatientID}), ${study.modality}, ` +
+      `${study.series.length} series / ${instanceCount} instances${started?.status === STUDY_STATUS.AI_PROCESSING ? "; AI analysis started" : ""}`
+  );
   return { studyInstanceUid: uid, result: isNew ? "created" : "updated", status: started?.status ?? study.status };
 }
 
@@ -129,7 +138,7 @@ export async function syncFromOrthanc() {
         const page = await orthanc.getChanges(state.lastSeq);
         for (const change of page.Changes) {
           if (change.ChangeType === "StableStudy") {
-            const { result } = await ingestOrthancStudy(change.ID);
+            const { result } = await ingestOrthancStudy(change.ID, { source: "poll" });
             if (result === "created" || result === "updated") ingested++;
           }
           state.lastSeq = change.Seq;
@@ -146,7 +155,31 @@ export async function syncFromOrthanc() {
 
 export const viewerUrl = (studyInstanceUid) => `${OHIF_VIEWER_URL}?StudyInstanceUIDs=${encodeURIComponent(studyInstanceUid)}`;
 
-export function summary(s) {
+export async function deleteStudy(studyInstanceUid, deletedBy) {
+  const study = await getStudy(studyInstanceUid);
+  if (study.status === STUDY_STATUS.AI_PROCESSING) throw new HttpError(409, "The AI is still analysing this study. Delete it once the analysis ends.");
+  if (study.status === STUDY_STATUS.REPORTED) throw new HttpError(409, "This study has a finalised report. Reopen the report before deleting the study.");
+
+  const patientId = study.patient._id;
+  await Promise.all([Report.deleteOne({ studyInstanceUid }), ReportImage.deleteMany({ studyInstanceUid }), Study.deleteOne({ _id: study._id })]);
+  if (!(await Study.exists({ patient: patientId }))) await Patient.deleteOne({ _id: patientId });
+
+  await emit(TAGS.STUDY_DELETED, studyInstanceUid, { actor: "reviewer", payload: { deletedBy, orthancId: study.orthancId } });
+  console.log(`[STUDY] ${studyInstanceUid} deleted by ${deletedBy || "unknown"}; the images stay in Orthanc`);
+  return { studyInstanceUid };
+}
+
+export async function reviewCounts(studyInstanceUids) {
+  const reports = await Report.find({ studyInstanceUid: { $in: studyInstanceUids } }, { studyInstanceUid: 1, "suggestions.decision": 1 }).lean();
+  return new Map(
+    reports.map((r) => [
+      r.studyInstanceUid,
+      { total: r.suggestions.length, decided: r.suggestions.filter((x) => x.decision !== "pending").length },
+    ])
+  );
+}
+
+export function summary(s, review) {
   return {
     studyInstanceUid: s.studyInstanceUid,
     viewerUrl: viewerUrl(s.studyInstanceUid),
@@ -171,6 +204,13 @@ export function summary(s) {
     seriesCount: s.series.length,
     instanceCount: s.series.reduce((n, se) => n + se.instances.length, 0),
     model: s.ai?.model,
+    ai: {
+      requestedAt: s.ai?.requestedAt,
+      completedAt: s.ai?.completedAt,
+      error: s.ai?.error,
+      failureReason: s.ai?.failureReason,
+    },
+    review: review || null,
     hasPreviousAi: !!s.previousAi?.completedAt,
     updatedAt: s.updatedAt,
   };
@@ -227,9 +267,20 @@ export async function rollbackAi(studyInstanceUid, { rolledBackBy } = {}) {
   return summary(study);
 }
 
-export async function startAnalysis(studyInstanceUid, mode, { model: requestedModel, prompt } = {}) {
+export async function startAnalysis(studyInstanceUid, mode, { model: requestedModel, prompt, auto = false } = {}) {
   const study = await getStudy(studyInstanceUid);
   await assertCanAnalyze(study);
+  try {
+    await assertAiAllowed(studyInstanceUid);
+  } catch (err) {
+    if (!auto) throw err;
+    console.warn(`[AI] study ${studyInstanceUid} not analysed: ${err.message}`);
+    study.status = STUDY_STATUS.AI_FAILED;
+    study.ai = { mode, requestedAt: new Date(), error: err.message, failureReason: AI_FAILURE_REASON.PROCESSING_ERROR };
+    await study.save();
+    await emit(TAGS.AI_FAILED, studyInstanceUid, { actor: "server", payload: { error: err.message, guard: true } });
+    return summary(study);
+  }
 
   if (study.ai?.completedAt) {
     study.previousAi = study.toObject().ai;
@@ -240,6 +291,7 @@ export async function startAnalysis(studyInstanceUid, mode, { model: requestedMo
   await study.save();
   await emit(TAGS.AI_REQUESTED, studyInstanceUid, { payload: { mode, requestedModel, prompt } });
 
+  console.log(`[AI] study ${studyInstanceUid} started: ${mode} mode, model ${requestedModel || "auto"}`);
   runAnalysis(study, mode, { model: requestedModel, prompt }).catch((err) => console.error("[AI] unhandled", err));
   return summary(study);
 }
@@ -255,11 +307,17 @@ export async function retryStudy(id, { mode, model, prompt }) {
   }
 
   try {
-    await ingestOrthancStudy(found.orthancId, { autoAnalyze: false, force: true });
+    await ingestOrthancStudy(found.orthancId, { autoAnalyze: false, force: true, source: "retry" });
   } catch (err) {
     throw new HttpError(502, `Could not re-fetch the study from Orthanc: ${err.message}`);
   }
   return startAnalysis(found.studyInstanceUid, mode, { model, prompt });
+}
+
+function failureReason(study, err) {
+  if (!study.series.some((s) => s.instances.length) || /no images/i.test(err.message)) return AI_FAILURE_REASON.INCOMPLETE_STUDY;
+  if (/does not support modality|no model/i.test(err.message)) return AI_FAILURE_REASON.NO_MODEL;
+  return AI_FAILURE_REASON.PROCESSING_ERROR;
 }
 
 async function runAnalysis(study, mode, options) {
@@ -273,6 +331,7 @@ async function runAnalysis(study, mode, options) {
       if (o.source?.sopInstanceUid) o.source.seriesInstanceUid ??= seriesOf.get(o.source.sopInstanceUid);
     }
 
+    console.log(`[AI] study ${uid} done: ${result.model?.id}, ${result.observations.length} observation(s), ${Math.round((Date.now() - study.ai.requestedAt) / 1000)} s`);
     study.ai = { mode, requestedModel: options.model, prompt: options.prompt, requestedAt: study.ai.requestedAt, ...result, completedAt: new Date() };
     study.status = STUDY_STATUS.REPORT_PENDING;
     await study.save();
@@ -286,8 +345,10 @@ async function runAnalysis(study, mode, options) {
   } catch (err) {
     study.status = STUDY_STATUS.AI_FAILED;
     study.ai.error = err.message;
+    study.ai.failureReason = failureReason(study, err);
+    console.error(`[AI] study ${uid} failed (${study.ai.failureReason}): ${err.message}`);
     await study.save();
-    await emit(TAGS.AI_FAILED, uid, { actor: "ai", payload: { error: err.message } });
+    await emit(TAGS.AI_FAILED, uid, { actor: "ai", payload: { error: err.message, failureReason: study.ai.failureReason } });
   }
 }
 

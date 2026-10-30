@@ -8,17 +8,20 @@ import eventsRouter from "./routes/events.js";
 import patientsRouter from "./routes/patients.js";
 import radiologistsRouter, { authRouter, currentRadiologist } from "./routes/radiologists.js";
 import { listModels } from "./services/aiClient.js";
+import { aiUsage } from "./services/aiGuard.js";
 import { ingestPushedStudy } from "./services/studies.js";
 import { ok, HttpError } from "./utils/http.js";
-import { identify } from "./utils/auth.js";
+import { identify, requireSignedIn, verifyPushSecret } from "./utils/auth.js";
+import { orthancProxy } from "./routes/orthancProxy.js";
 
 const app = express();
 
+app.use(["/ohif", "/dicom-web", "/wado"], identify, requireSignedIn, orthancProxy);
 app.use(helmet());
 app.use(cors());
 app.use(morgan("dev"));
 
-app.post("/event/preregister", express.json({ limit: "50mb" }), async (req, res) => {
+app.post("/event/preregister", verifyPushSecret, express.json({ limit: "50mb" }), async (req, res) => {
   const result = await ingestPushedStudy(req.body);
   if (result.result === "rejected") throw new HttpError(422, result.reason);
   return ok(res, result, result.result);
@@ -33,13 +36,20 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth", authRouter);
-app.use("/api", identify);
+app.use("/api", identify, requireSignedIn);
 app.use("/api/studies", studiesRouter);
 app.use("/api/events", eventsRouter);
 app.use("/api/patients", patientsRouter);
 app.use("/api/radiologists", radiologistsRouter);
 app.get("/api/me", currentRadiologist);
-app.get("/api/models", async (req, res) => ok(res, await listModels()));
+app.get("/api/ai/limits", async (req, res) => ok(res, await aiUsage()));
+app.get("/api/models", async (req, res) => {
+  try {
+    return ok(res, await listModels());
+  } catch (err) {
+    throw new HttpError(502, `AI provider unreachable: ${err.cause?.code || err.message}`);
+  }
+});
 
 app.use((req, res) => res.status(404).json({ code: 1, message: "Not found", data: null }));
 

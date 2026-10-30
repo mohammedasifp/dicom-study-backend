@@ -1,9 +1,13 @@
 import { getInstanceFile } from "./orthanc.js";
 import * as dr7 from "./dr7Client.js";
 
-const USE_DR7 = process.env.AI_PROVIDER === "dr7";
+const PROVIDERS = ["mock", "dr7"];
+const AI_PROVIDER = (process.env.AI_PROVIDER || "mock").trim().toLowerCase();
+if (!PROVIDERS.includes(AI_PROVIDER)) throw new Error(`AI_PROVIDER must be one of ${PROVIDERS.join(", ")}, got "${AI_PROVIDER}"`);
+const USE_DR7 = AI_PROVIDER === "dr7";
 const AI_BASE_URL = process.env.AI_BASE_URL || "http://localhost:4100";
 const CHUNK_SIZE = Number(process.env.AI_CHUNK_SIZE) || 5;
+console.log(`[AI] provider ${AI_PROVIDER}${USE_DR7 ? "" : ` at ${AI_BASE_URL}`}`);
 
 function studyMeta(study, { model, prompt } = {}) {
   return {

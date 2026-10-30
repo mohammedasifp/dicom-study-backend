@@ -2,7 +2,7 @@ import { Router } from "express";
 import { isValidObjectId } from "mongoose";
 import Radiologist from "../models/Radiologist.js";
 import { ok, HttpError } from "../utils/http.js";
-import { hashPassword, signToken, verifyPassword } from "../utils/auth.js";
+import { clearSessionCookie, hashPassword, setSessionCookie, signToken, verifyPassword } from "../utils/auth.js";
 
 const router = Router();
 const FIELDS = ["name", "username", "email", "designation", "subspecialty", "modalities", "status"];
@@ -71,10 +71,15 @@ authRouter.post("/login", async (req, res) => {
   if (!username || !password) throw new HttpError(400, "username and password are required");
   const radiologist = await Radiologist.findOne({ username, status: "ACTIVE" }).select("+passwordHash").lean();
   if (!radiologist || !verifyPassword(password, radiologist.passwordHash)) throw new HttpError(401, "Invalid username or password");
-  return ok(res, { token: signToken(radiologist._id), user: toView(radiologist) }, "signed in");
+  const token = signToken(radiologist._id);
+  setSessionCookie(res, token);
+  return ok(res, { token, user: toView(radiologist) }, "signed in");
 });
 
-authRouter.post("/logout", (req, res) => ok(res, null, "signed out"));
+authRouter.post("/logout", (req, res) => {
+  clearSessionCookie(res);
+  return ok(res, null, "signed out");
+});
 
 export async function currentRadiologist(req, res) {
   if (!req.user) throw new HttpError(401, "Not signed in");

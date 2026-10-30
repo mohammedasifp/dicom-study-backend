@@ -19,7 +19,7 @@ Requirements: Node 24 and a local MongoDB. Orthanc, OHIF, the webapp and this ba
    ```
 
 3. Start Orthanc (see below).
-4. Start the mock AI: `npm run mock-ai`. It listens on port 4100. Not needed with `AI_PROVIDER=dr7`.
+4. Start the mock AI: `npm run mock-ai`. It listens on port 4100. Needed when `AI_PROVIDER=mock` (the default), not with `AI_PROVIDER=dr7`.
 5. Add the test radiologists: `npm run seed` (see Auth).
 6. Start the backend: `npm run dev`. It listens on port 4000.
 7. Start the webapp (see below).
@@ -29,21 +29,23 @@ MongoDB creates the database and its collections when the first study arrives fr
 
 ### Orthanc
 
-- Folder: `Desktop\Hackathon\orthanc`. It holds the other dev's `Dockerfile`, `callbackEvent.py` and `SVAIMcOre.json`, plus our `docker-compose.yml`.
-- Start, in that folder: `docker compose -p hackathon up --build -d`
-- Project name `hackathon`. Restart policy `unless-stopped`.
-- Ports: `8042` and `8043` (both go to Orthanc 8042), `4242` (DICOM).
-- Named volume `orthanc-storage` on `/var/lib/orthanc/storage`. The studies stay when the container is recreated.
-- `STUDY_API_HOST=host.docker.internal:4000`, `STUDY_API_PATH=/event/preregister`. So Orthanc pushes each stable study to this backend.
+- Folder: `Desktop\Appzoy POC\orthanc`. It holds the `Dockerfile`, `callbackEvent.py`, `SVAIMcOre.json`, `docker-compose.yml`, `start.sh` and `.env` (the push secret; keep it private).
+- Start, inside WSL: `bash start.sh`. It sets `BACKEND_HOST_IP` to the Windows host (the WSL default gateway; `host.docker.internal` does not work with Docker Engine in WSL) and runs `docker compose -p svaim up --build -d`.
+- Project name `svaim`. Restart policy `unless-stopped`.
+- Ports: `8042` (HTTP), `4242` (DICOM).
+- External volume `svaim_orthanc-storage` on `/var/lib/orthanc/storage`. The studies stay when the container is recreated.
+- `STUDY_API_HOST=backend-host:4000`, `STUDY_API_PATH=/event/preregister`. So Orthanc pushes each stable study to this backend.
+- **Push secret:** `callbackEvent.py` sends `X-Push-Secret` from `ORTHANC_PUSH_SECRET` (orthanc folder `.env`). The backend rejects a push with a wrong or missing secret with `401`. The value in `config/dev.env` must match. Without `ORTHANC_PUSH_SECRET` in the backend, any caller may push, and the backend logs a warning.
+- `SVAIMcOre.json` has no `DicomWeb.Host`. Orthanc then builds its DICOMweb links from the `Forwarded` header, which the image proxy sets to the browser's host.
 - The backend needs `ORTHANC_USERNAME` and `ORTHANC_PASSWORD` in `config/dev.env`: a user from `RegisteredUsers` in `SVAIMcOre.json`. Without them the push still creates the visit, but the safety-net pull and the AI image download get `401`, and the study shows `AI_FAILED`.
 - At startup the backend logs one line: `[ORTHANC] <url>, basic auth set` (or `not set`). It prints no user name or password. Check it when Orthanc gives `401`.
 - Orthanc `401` with basic auth set: the `ORTHANC_USERNAME` value does not match a user in `RegisteredUsers`.
 
 ### Webapp
 
-- Repo `Desktop\Hackathon\dicom-study`.
+- Repo `Desktop\Appzoy POC\dicom-study`.
 - `npm install`, then `npm run dev`. Vite listens on port 5173.
-- Vite sends `/api` to the backend on port 4000. It sends `/ohif` and `/dicom-web` to Orthanc on port 8042, with basic auth. The default user is the svaim user in `vite.config.js`.
+- Vite sends `/api`, `/ohif`, `/dicom-web` and `/wado` to the backend (`BACKEND_URL`, port 4000). The webapp has no Orthanc address or password. See Image proxy.
 - Sign in with a seeded username and the password that `npm run seed` printed (see Auth).
 - Branch `backend-login`: the webapp has no hard-coded logins and no mock sign-in. The auth source is `backend` by default (or `http`).
 - After you delete webapp modules, Vite can serve a stale module, for example "does not provide an export named 'login'". Restart Vite with `--force`.
@@ -56,13 +58,20 @@ MongoDB creates the database and its collections when the first study arrives fr
 | `ORTHANC_USERNAME` / `ORTHANC_PASSWORD` | (none) | Orthanc basic-auth user |
 | `ORTHANC_POLL_MS` | `60000` | Time between safety-net polls of the Orthanc change feed |
 | `AUTO_ANALYZE` | `true` | Start the AI analysis when a new visit arrives |
-| `AI_PROVIDER` | (mock) | AI provider: unset for the mock AI API, `dr7` for dr7.ai. See AI providers. |
+| `AI_PROVIDER` | `mock` | AI provider: `mock` for the mock AI API, `dr7` for dr7.ai. Any other value stops the backend at startup. It logs `[AI] provider <name>`. See AI providers. |
+| `ORTHANC_PUSH_SECRET` | (none) | Shared secret that Orthanc sends as `X-Push-Secret` on `/event/preregister`. Must match the orthanc folder's `.env`. |
+| `AI_DAILY_LIMIT` | `100` | Most AI analyses in any 24 hours, all studies. See AI guard rails. |
+| `AI_PER_STUDY_DAILY_LIMIT` | `5` | Most AI analyses of one study in any 24 hours |
+| `AI_MAX_CONCURRENT` | `3` | Most AI analyses running at once |
+| `AI_MIN_CREDIT_USD` | `1` | dr7 only: refuse new analyses when dr7's remaining credit falls below this |
+| `DR7_MAX_TOKENS` | `2000` | `max_tokens` per dr7 call. 800 was too low: replies were cut off mid-JSON. |
+| `DR7_TIMEOUT_MS` | `120000` | Timeout per dr7 call |
 | `AI_API_KEY` | (none) | dr7.ai API key, sent as a Bearer token. Required when `AI_PROVIDER=dr7`. Keep it in `config/dev.env` only. |
 | `DR7_BASE_URL` | `https://dr7.ai/api/v1/medical` | dr7.ai base URL. The backend calls `<base>/chat/completions` and `<base>/models`. |
 | `AI_BASE_URL` | `http://localhost:4100` | AI API base URL (mock provider) |
 | `AI_MODE` | `chunk` | Default AI mode: `stream` or `chunk` |
 | `AI_CHUNK_SIZE` | `5` | Instances per chunk in chunk mode (mock provider) |
-| `OHIF_VIEWER_URL` | `http://localhost:8042/ohif/viewer` | Base URL for the viewer links |
+| `OHIF_VIEWER_URL` | `/ohif/viewer` | Base URL for the viewer links. Relative, so the link goes through the image proxy. |
 | `SCAN_NOT_VIEWED_MINUTES` | `15` | Time after AI completion before a study is flagged `SCAN_NOT_VIEWED` |
 | `WATCH_INTERVAL_MS` | `30000` | How often the not-viewed check and the SLA overdue check run |
 | `MOCK_AI_PORT` | `4100` | Mock AI port |
@@ -85,16 +94,28 @@ Changed 30/10/26. This replaces the identity-only login.
   - `signature` is HMAC-SHA256 of the payload with `AUTH_SECRET`, base64url.
   - Without `AUTH_SECRET`, a fixed development secret is used and the server logs a warning. Set `AUTH_SECRET` outside local dev.
 - The client sends the token as `Authorization: Bearer <token>`.
-- **`identify` middleware** runs on every `/api` route, after `/api/auth`:
-  - No token: the request is anonymous and goes on. The Orthanc push, the SSE stream and image GETs carry no token.
+- **Session cookie** (changed 30/10/26): login also sets the same token as cookie `sb_session` (HttpOnly, SameSite=Lax, path `/`, 12 hours). `<img>`, `EventSource` and the OHIF iframe cannot send a header, so they rely on it.
+  - The cookie is read **only on GET and HEAD**. Writes need the Bearer header, so a cross-site form cannot act with the cookie (CSRF).
+  - A request with a valid Bearer token and no matching cookie gets the cookie set. So a session from before this change gains the cookie on its next API call.
+- **Sign-in is required on every route** (changed 30/10/26), except `POST /api/auth/login`, `POST /api/auth/logout`, `/health` and the Orthanc push `/event/preregister` (which has its own push secret):
+  - No token: `401` "Sign in first". This covers all `/api` routes and the image proxy.
   - A forged, expired or unreadable token, or one that names an inactive or deleted radiologist: `401` "Session is not valid".
   - A valid token: the request carries the signed-in radiologist.
-- `GET /api/me`: the signed-in radiologist. No token: `401` "Not signed in". The `X-User-Id` header is no longer read.
-- **Actor names:** with a token, the backend takes the name from the signed-in radiologist and ignores the body value. This applies to `reviewer` (save, decide, finalise, reopen), `viewedBy`, `setBy` (SLA), `assignedBy` and `rolledBackBy`. Without a token, the body value is used as before.
-- `POST /api/auth/logout` returns ok. Tokens are stateless, so logout is client-side: the client drops the token. A token stays valid until it expires.
+- `GET /api/me`: the signed-in radiologist. The `X-User-Id` header is no longer read.
+- **Actor names:** the backend takes the name from the signed-in radiologist and ignores the body value. This applies to `reviewer` (save, decide, finalise, reopen), `viewedBy`, `setBy` (SLA), `assignedBy` and `rolledBackBy`.
+- `POST /api/auth/logout` clears the cookie. Tokens are stateless: the client drops the token, and a copied token stays valid until it expires.
 - Radiologist create and update accept `password`. It must be text of at least 6 characters, else `400`. Only the hash is stored.
 - `POST /api/radiologists` and `PATCH /api/radiologists/:id` need a signed-in user (Bearer token). Without one: `401` "Sign in to change radiologists". Reason: the backend is reachable on ngrok. Changed 30/10/26.
-- **Not production-grade:** no rate limit on sign-in, no token revocation, no refresh. All other routes still accept anonymous calls.
+- **Not production-grade:** no rate limit on sign-in, no token revocation, no refresh. The cookie has no `Secure` flag, so it also travels over plain HTTP.
+
+## Image proxy
+
+Changed 30/10/26. `/ohif`, `/dicom-web` and `/wado` are forwarded to Orthanc (`ORTHANC_URL`) with the backend's Orthanc login. Code: `src/routes/orthancProxy.js`.
+
+- Needs a session (cookie or Bearer), else `401`.
+- `GET` and `HEAD` only. Other methods: `405`. So STOW (upload) is not possible through the proxy; upload in Orthanc Explorer 2 instead.
+- Mounted before `helmet`, so Orthanc's own headers reach OHIF unchanged.
+- Sends `Forwarded: host=<browser host>;proto=<proto>` (from `X-Forwarded-Host` when a proxy such as Vite sits in front). Orthanc builds its DICOMweb links from it.
 
 Test accounts: `npm run seed` (`scripts/seed-radiologists.js`) upserts 4 radiologists by username. Changed 30/10/26:
 
@@ -140,10 +161,10 @@ A new seeded row starts `ACTIVE`. A second run updates the rows, resets the pass
 | `patients` | One row per DICOM Patient ID: name, sex, birth date | `ACTIVE`, `INACTIVE` |
 | `studies` | One row per visit's study (StudyInstanceUID): patient ref, accession, modality, `studyDate`, `studyTime` (DICOM StudyTime, for example `094647.000000`), description, series (each with `seriesNumber`) and instances, clinical context (`referringPhysician`, `clinicalHistory`, `technique`, `priority`, `patientClass`), `reportedAt`, viewed flag, SLA timer (`sla`: minutes, setAt, setBy, dueAt, overdueAt), radiologist assignment (`assignment`: radiologist ref, assignedAt, assignedBy), Orthanc ID and `orthancLastUpdate` (to skip an unchanged study), AI result (mode, requested model, prompt, model used, observations, ROIs, uncertainty, limitations), `previousAi` (the AI result before the last new run, same fields, one version only). Each observation holds `section`, `title`, `text`, `confidence`, `limitation`, `series`, `instance` (image number) and `source` (`seriesInstanceUid`, `sopInstanceUid`). See Clinical context fields. | `RECEIVED`, `AI_PROCESSING`, `AI_FAILED`, `REPORT_PENDING`, `REPORTED` |
 | `reports` | One row per study: patient and study refs, AI suggestions with the reviewer's decision (each with `section`, `title`, `limitation`, `confidence`, `series`, `instance` and `source`, copied from the observation), findings and impression with their source (AI, AI edited by the reviewer, reviewer), `body` (the editor JSON, `null` until the first save), `history` (one entry per reopen: finalisedAt, reviewer, reopenedAt, reopenedBy, reason), `previous` (the draft before the last new run: model, suggestions with their decisions, findings, impression, body, uncertainty, limitations, reviewer, authorship, computedAuthorship, `savedAt`), disclaimer, reviewer | `draft`, `final` |
-| `reportimages` | One row per image added to a report: studyInstanceUid, contentType, size, the image bytes | — |
+| `reportimages` | One row per image added to a report: studyInstanceUid, contentType, size, the image bytes | â€” |
 | `radiologists` | One row per radiologist: name (required), `username` (optional, unique, lowercased, used to sign in), `passwordHash` (scrypt `salt:hash`, never returned), email (optional, unique, lowercased), designation, subspecialty, modalities (from CR, DX, CT, MR, US) | `ACTIVE`, `INACTIVE` |
 | `events` | Audit and notification log: tag, study, actor, payload | (the tag) |
-| `syncstates` | The last Orthanc change number that was processed | — |
+| `syncstates` | The last Orthanc change number that was processed | â€” |
 
 The same patient can come back for a new visit. Each visit's study links to the same `patients` row.
 
@@ -171,11 +192,13 @@ All JSON responses use `{ code, message, data }`. `code` is `0` on success and `
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/event/preregister` | Orthanc pushes a stable study here, with its full details. Outside `/api`, to match the Orthanc script. JSON limit 50 MB on this route only. Reply `200` with `data: { studyInstanceUid, result, status }` and `message` `created`, `updated` or `unchanged`. `400` if the body is not the Orthanc payload. `422` with the reason if the study is rejected. |
+| `POST` | `/event/preregister` | Orthanc pushes a stable study here, with its full details. Outside `/api`, to match the Orthanc script. Needs header `X-Push-Secret` when `ORTHANC_PUSH_SECRET` is set, else `401`. JSON limit 50 MB on this route only. Reply `200` with `data: { studyInstanceUid, result, status }` and `message` `created`, `updated` or `unchanged`. `400` if the body is not the Orthanc payload. `422` with the reason if the study is rejected. |
 | `POST` | `/api/studies/sync` | Read the Orthanc change feed now (manual call, and the safety net). `ingested` counts only created or updated studies. |
 | `POST` | `/api/studies/:id/retry` | Fetch the study from Orthanc again and re-run the AI. `:id` is the StudyInstanceUID or the Mongo `_id`. Body (all optional): `{ "model": "mr-msk-mock", "mode": "stream", "prompt": "Focus on C5-C6." }`. The prompt is text of at most 2000 characters. |
-| `GET` | `/api/models` | The AI models: `id`, `name`, `version`, `modalities`. The list depends on the provider (see AI providers). With dr7, each model also has `category`, `supportsImage` and `minTier`. |
-| `GET` | `/api/studies` | List studies. Each summary has `studyDate`, `studyTime`, `description`, `referringPhysician`, `clinicalHistory`, `technique`, `priority`, `patientClass`, `reportedAt`, `sla`, `assignment` (radiologist populated), `assignedTo` (radiologist id string, or `null`) and `hasPreviousAi` (`true` if a rollback is possible). Filters: `?status=`, `?viewed=true/false`, `?radiologist=<id>` (`400` if not an id) |
+| `GET` | `/api/ai/limits` | AI usage against the guard rails: `{ last24h, running, dailyLimit, perStudyDailyLimit, maxConcurrent, minCreditUsd, lastCreditUsd }`. `lastCreditUsd` is the dr7 credit from the last dr7 reply, `null` until one arrives. |
+| `DELETE` | `/api/studies/:uid` | Delete a study from the worklist, with its report, report images and, if no other study uses it, its patient. The images stay in Orthanc, and the events stay as the audit trail (plus `STUDY_DELETED`). `404` unknown study. `409` while the AI is running, or when the report is finalised (reopen it first). Changed 30/10/26. A later push of the same study from Orthanc creates it again. |
+| `GET` | `/api/models` | The AI models: `id`, `name`, `version`, `modalities`. The list depends on the provider (see AI providers). `502` "AI provider unreachable: <cause>" when the provider cannot be reached. With dr7, each model also has `category`, `supportsImage` and `minTier`. |
+| `GET` | `/api/studies` | List studies. Each summary has `studyDate`, `studyTime`, `description`, `referringPhysician`, `clinicalHistory`, `technique`, `priority`, `patientClass`, `reportedAt`, `sla`, `assignment` (radiologist populated), `assignedTo` (radiologist id string, or `null`) `hasPreviousAi` (`true` if a rollback is possible), `ai` (`requestedAt`, `completedAt`, `error`, `failureReason`) and `review` (`{ total, decided }`: AI suggestions in the draft and how many have a decision other than `pending`; `null` when there is no report). `PUT /:uid/assignment` returns the same `review`. Changed 30/10/26. Filters: `?status=`, `?viewed=true/false`, `?radiologist=<id>` (`400` if not an id) |
 | `GET` | `/api/studies/:uid` | One study with `studyDate`, `studyTime`, its series (each with `seriesNumber`), clinical context fields, AI result, `previousAi`, `sla`, `assignment` (radiologist populated) and `viewerUrl` |
 | `POST` | `/api/studies/:uid/analyze` | Run or re-run the AI analysis. Body: `{ "mode": "stream" }` |
 | `POST` | `/api/studies/:uid/ai/rollback` | Go back one AI version. Body: `{ "rolledBackBy": "..." }` (optional). Reply: the study summary. See AI rollback. |
@@ -193,11 +216,11 @@ All JSON responses use `{ code, message, data }`. `code` is `0` on success and `
 | `GET` | `/api/patients` | List patients |
 | `GET` | `/api/patients/:patientId` | One patient with all visits (assigned radiologist populated) and reports |
 | `GET` | `/api/radiologists` | List radiologists, sorted by name. Filters: `?status=ACTIVE/INACTIVE`, `?modality=CR`. Each radiologist also has `id` (string) and `initials` (from the name, "Dr." dropped). |
-| `POST` | `/api/radiologists` | Add a radiologist. Body: `{ name, username, password, email, designation, subspecialty, modalities, status }`. Needs a signed-in user: `401` "Sign in to change radiologists" without a Bearer token. Only `name` is required. `password` (optional) must be at least 6 characters, else `400`. Only its hash is stored. Reply `201`. `400` on a validation error (for example a missing name or modality `MG`). `409` if the username or the email is already used (case-insensitive). The message names the field. |
-| `PATCH` | `/api/radiologists/:id` | Update any of the seven fields, or set a new `password` (at least 6 characters), for example `{ "status": "INACTIVE" }`. Needs a signed-in user: `401` "Sign in to change radiologists" without a Bearer token. `404` for an unknown id. `409` for a used username or email. There is no delete. Set `INACTIVE` instead. |
-| `POST` | `/api/auth/login` | Sign in. Body: `{ username, password }`, both required (`400`). Reply `{ token, user }`. `token` is a signed token valid for 12 hours. `user` has the list shape, without `passwordHash`. `401` "Invalid username or password" for a wrong username, a wrong password or an inactive radiologist. See Auth. |
-| `POST` | `/api/auth/logout` | Reply ok. Nothing is stored on the server. The token stays valid until it expires. |
-| `GET` | `/api/me` | The signed-in radiologist, same shape as the list. Header `Authorization: Bearer <token>`. `401` "Not signed in" without a token. `401` "Session is not valid" for a forged or expired token, or an unknown or inactive radiologist. Changed 30/10/26: the `X-User-Id` header and the oldest-active fallback are gone. |
+| `POST` | `/api/radiologists` | Add a radiologist. Body: `{ name, username, password, email, designation, subspecialty, modalities, status }`. Needs a signed-in user: `401` "Sign in first" without one. Only `name` is required. `password` (optional) must be at least 6 characters, else `400`. Only its hash is stored. Reply `201`. `400` on a validation error (for example a missing name or modality `MG`). `409` if the username or the email is already used (case-insensitive). The message names the field. |
+| `PATCH` | `/api/radiologists/:id` | Update any of the seven fields, or set a new `password` (at least 6 characters), for example `{ "status": "INACTIVE" }`. Needs a signed-in user: `401` "Sign in first" without one. `404` for an unknown id. `409` for a used username or email. There is no delete. Set `INACTIVE` instead. |
+| `POST` | `/api/auth/login` | Sign in. Body: `{ username, password }`, both required (`400`). Reply `{ token, user }`, and set the `sb_session` cookie. `token` is a signed token valid for 12 hours. `user` has the list shape, without `passwordHash`. `401` "Invalid username or password" for a wrong username, a wrong password or an inactive radiologist. See Auth. |
+| `POST` | `/api/auth/logout` | Reply ok and clear the `sb_session` cookie. Nothing is stored on the server. The token stays valid until it expires. |
+| `GET` | `/api/me` | The signed-in radiologist, same shape as the list. Header `Authorization: Bearer <token>`. `401` "Sign in first" without a token. `401` "Session is not valid" for a forged or expired token, or an unknown or inactive radiologist. Changed 30/10/26: the `X-User-Id` header and the oldest-active fallback are gone. |
 | `GET` | `/api/events` | Poll events. Query: `?since=<eventId>`, `?studyInstanceUid=` |
 | `GET` | `/api/events/stream` | SSE stream. Pushes `AI_COMPLETED` and `REPORT_OVERDUE`. After a reconnect, it replays the messages of both tags missed since `Last-Event-ID` or `?since=` |
 | `GET` | `/api/events/tags` | All event tags (read-only list, for display in the webapp) |
@@ -229,6 +252,27 @@ Each report holds two values. The decision on which one to use is open (29/10/26
 `STUDY_RECEIVED`, `STUDY_REJECTED`, `AI_REQUESTED`, `AI_STREAM_CHUNK`, `AI_CHUNK_SENT`, `AI_COMPLETED`, `AI_FAILED`, `REPORT_PENDING`, `SCAN_VIEWED`, `SCAN_NOT_VIEWED`, `SUGGESTION_ACCEPTED`, `SUGGESTION_EDITED`, `SUGGESTION_DISCARDED`, `REPORT_SAVED`, `REPORT_FINALISED`, `REPORT_EXPORTED`, `SLA_SET`, `REPORT_OVERDUE`, `RADIOLOGIST_ASSIGNED`, `RADIOLOGIST_UNASSIGNED`, `SUGGESTION_RESET`, `REPORT_REOPENED`, `REPORT_IMAGE_ADDED`, `AI_ROLLED_BACK`
 
 Only backend code sets tags, on each action. All of them go to the `events` log. Only `AI_COMPLETED` and `REPORT_OVERDUE` are pushed over SSE.
+
+## AI guard rails
+
+Changed 30/10/26. Code: `src/services/aiGuard.js`. Checked before every analysis (auto, retry and analyze):
+
+- Credit floor (dr7 only): below `AI_MIN_CREDIT_USD`, `503`. The credit comes from dr7's `x-dr7-credit-remaining` header on each reply.
+- `AI_DAILY_LIMIT` analyses in the last 24 hours, all studies: `429`.
+- `AI_PER_STUDY_DAILY_LIMIT` analyses of one study in the last 24 hours: `429`.
+- `AI_MAX_CONCURRENT` analyses running: `429`. A run older than 15 minutes is treated as stale and not counted.
+- Counts come from the `AI_REQUESTED` events, so they survive a restart.
+- A blocked **automatic** analysis (a new study from Orthanc) does not fail the push: the study becomes `AI_FAILED` with the reason as `ai.error`, and the radiologist can report manually or run the AI later.
+- Also: prompts at most 2000 characters, at most 4 images per dr7 analysis, `DR7_MAX_TOKENS` and `DR7_TIMEOUT_MS` per call.
+
+## Logs
+
+- `[ORTHANC] push received: …`, then `[ORTHANC] <push|poll|retry>: study <uid> created|updated|unchanged|rejected …` with patient, modality, series and instance counts, and whether the AI started.
+- `[ORTHANC] push refused from <ip>: wrong|missing X-Push-Secret`.
+- `[ORTHANC] proxy GET <path> -> <status>` for image-proxy errors (status 400 and up).
+- `[AI] study <uid> started|done|failed …`, `[AI] study <uid> not analysed: <guard reason>`.
+- `[AI] dr7 <model>: <in> in + <out> out tokens, about $<cost>; credit left $<credit>` for each dr7 call. The cost uses the per-1K prices in `dr7Client.js` (dr7.ai/pricing, 30/10/26).
+- `[STUDY] <uid> deleted by <name>`.
 
 ## AI providers
 
@@ -275,6 +319,7 @@ Only backend code sets tags, on each action. All of them go to the `events` log.
   - `findings` is `""`. `uncertainty` comes from the model, else "Not stated by the model."
   - No ROIs.
   - `limitations` say how many of the study's images the model saw, and that they were 768 px JPEG renders. A retry prompt is added there too.
+- **Failure reason** (changed 30/10/26): an `AI_FAILED` study also gets `ai.failureReason`. `INCOMPLETE_STUDY`: the study has no instances, or no images could be sent. `NO_MODEL`: no model supports the modality. `PROCESSING_ERROR`: anything else. `OUT_OF_SCOPE` exists for the webapp but is never set: a study with no supported modality is rejected at ingest and never listed.
 - **Errors** (the study becomes `AI_FAILED`):
   - No key: "AI_API_KEY is not set"
   - dr7 replies non-2xx: "dr7 <status>: <body>". A key below the model's tier gets a 402 or 403 style error.

@@ -1,9 +1,12 @@
 import { getRenderedJpeg } from "./orthanc.js";
 import { SUPPORTED_MODALITIES } from "../constants/tags.js";
+import { recordCredit } from "./aiGuard.js";
 
 const DR7_BASE_URL = process.env.DR7_BASE_URL || "https://dr7.ai/api/v1/medical";
 const AI_API_KEY = process.env.AI_API_KEY;
 const MAX_IMAGES = 4;
+const MAX_TOKENS = Number(process.env.DR7_MAX_TOKENS) || 2000;
+const TIMEOUT_MS = Number(process.env.DR7_TIMEOUT_MS) || 120000;
 const MODELS_TTL_MS = 10 * 60 * 1000;
 const CHEST_MODEL = "chexagent";
 const GENERAL_MODEL = "med-gemini";
@@ -25,7 +28,7 @@ let modelCache = { at: 0, models: null };
 
 export async function listModels() {
   if (modelCache.models && Date.now() - modelCache.at < MODELS_TTL_MS) return modelCache.models;
-  const res = await fetch(`${DR7_BASE_URL}/models`, { headers: authHeader() });
+  const res = await fetch(`${DR7_BASE_URL}/models`, { headers: authHeader(), signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) throw new Error(`dr7 models ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const models = (await res.json()).data.map((m) => ({
     id: m.id,
@@ -72,17 +75,39 @@ function promptText(study, prompt) {
 async function complete(model, content, stream) {
   const res = await fetch(`${DR7_BASE_URL}/chat/completions`, {
     method: "POST",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: { "Content-Type": "application/json", ...authHeader() },
-    body: JSON.stringify({ model, max_tokens: 800, temperature: 0.2, stream, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({
+      model,
+      max_tokens: MAX_TOKENS,
+      temperature: 0.2,
+      stream,
+      ...(stream && { stream_options: { include_usage: true } }),
+      messages: [{ role: "user", content }],
+    }),
   });
   if (!res.ok) throw new Error(`dr7 ${res.status}: ${(await res.text()).slice(0, 300)}`);
   return res;
 }
 
-async function readStream(res, onProgress) {
+// USD per 1K tokens [input, output], from dr7.ai/pricing (30/10/26).
+const PRICE_PER_1K = { "med-gemini": [0.002, 0.004], chexagent: [0.002, 0.004] };
+
+function logUsage(model, usage, res) {
+  recordCredit(res.headers.get("x-dr7-credit-remaining"));
+  if (!usage) return console.log(`[AI] dr7 ${model}: no usage reported`);
+  const [inPrice, outPrice] = PRICE_PER_1K[model] || PRICE_PER_1K["med-gemini"];
+  const usd = (usage.prompt_tokens * inPrice + usage.completion_tokens * outPrice) / 1000;
+  console.log(
+    `[AI] dr7 ${model}: ${usage.prompt_tokens} in + ${usage.completion_tokens} out tokens, about $${usd.toFixed(4)}; credit left $${res.headers.get("x-dr7-credit-remaining") ?? "?"}`
+  );
+}
+
+async function readStream(res, onProgress, model) {
   let buffer = "";
   let text = "";
   let sent = 0;
+  let usage;
   for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
     buffer += chunk;
     const lines = buffer.split("\n");
@@ -90,7 +115,9 @@ async function readStream(res, onProgress) {
     for (const raw of lines) {
       const line = raw.trim();
       if (!line.startsWith("data:") || line === "data: [DONE]") continue;
-      text += JSON.parse(line.slice(5)).choices?.[0]?.delta?.content || "";
+      const chunk = JSON.parse(line.slice(5));
+      if (chunk.usage) usage = chunk.usage;
+      text += chunk.choices?.[0]?.delta?.content || "";
       for (let nl = text.indexOf("\n", sent); nl !== -1; nl = text.indexOf("\n", sent)) {
         const done = text.slice(sent, nl).trim();
         sent = nl + 1;
@@ -100,6 +127,7 @@ async function readStream(res, onProgress) {
   }
   const rest = text.slice(sent).trim();
   if (rest) await onProgress({ type: "text", data: rest });
+  logUsage(model, usage, res);
   return text;
 }
 
@@ -109,25 +137,44 @@ function toConfidence(value) {
   return Math.min(n > 1 ? n / 100 : n, 1);
 }
 
-function parseJson(text) {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
+const stripFences = (text) => text.replace(/```(?:json)?/gi, "");
+
+function tryParse(text) {
   try {
-    const json = JSON.parse(text.slice(start, end + 1));
-    return Array.isArray(json.observations) ? json : null;
+    return JSON.parse(text);
   } catch {
     return null;
   }
 }
 
-function parseLines(text) {
-  const lines = text.split("\n").map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim());
-  return { observations: lines.filter(Boolean).map((line) => ({ text: line })), impression: "", uncertainty: "" };
+function parseJson(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  const json = tryParse(text.slice(start, end + 1));
+  return json && Array.isArray(json.observations) ? json : null;
 }
 
-function parse(text, imageNumber, imageCount) {
-  const json = parseJson(text);
+function salvageJson(text) {
+  const at = text.search(/"observations"\s*:/);
+  if (at === -1) return null;
+  // Regex, not JSON.parse: a reply cut off at max_tokens is invalid JSON as a whole.
+  const observations = (text.slice(at).match(/\{[^{}]*\}/g) || []).map(tryParse).filter(Boolean);
+  const uncertainty = text.match(/"uncertainty"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  return { observations, uncertainty: uncertainty ? tryParse(`"${uncertainty[1]}"`) || "" : "" };
+}
+
+const JSON_SYNTAX_LINE = /^(?:[{}[\],]+|"[A-Za-z_]+"\s*:.*)$/;
+
+function parseLines(text) {
+  const lines = text.split("\n").map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim());
+  return { observations: lines.filter((l) => l && !JSON_SYNTAX_LINE.test(l)).map((line) => ({ text: line })), impression: "", uncertainty: "" };
+}
+
+function parse(raw, imageNumber, imageCount) {
+  const text = stripFences(raw);
+  const json = parseJson(text) || salvageJson(text);
+  if (json && !parseJson(text)) console.warn(`[AI] dr7 reply was not valid JSON (likely cut off); kept ${json.observations.length} complete observation(s)`);
   const parsed = json || parseLines(text);
   const items = [...parsed.observations];
   const impression = typeof parsed.impression === "string" ? parsed.impression.trim() : "";
@@ -192,11 +239,13 @@ export async function analyze(study, mode, { model, prompt } = {}, onProgress) {
 
   if (mode === "stream") {
     const content = [{ type: "text", text }, ...(await Promise.all(images.map((img, i) => imageParts(img, i + 1)))).flat()];
-    parts.push(parse(await readStream(await complete(useModel, content, true), onProgress), undefined, images.length));
+    parts.push(parse(await readStream(await complete(useModel, content, true), onProgress, useModel), undefined, images.length));
   } else {
     for (const [index, image] of images.entries()) {
       const res = await complete(useModel, [{ type: "text", text }, ...(await imageParts(image, index + 1))], false);
-      parts.push(parse((await res.json()).choices?.[0]?.message?.content || "", index + 1, images.length));
+      const reply = await res.json();
+      logUsage(useModel, reply.usage, res);
+      parts.push(parse(reply.choices?.[0]?.message?.content || "", index + 1, images.length));
       await onProgress({ type: "chunk", data: { index, totalChunks: images.length, instances: 1 } });
     }
   }
