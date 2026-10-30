@@ -315,6 +315,7 @@ export async function retryStudy(id, { mode, model, prompt }) {
 }
 
 function failureReason(study, err) {
+  if (err.message.startsWith("AI declined")) return AI_FAILURE_REASON.OUT_OF_SCOPE;
   if (!study.series.some((s) => s.instances.length) || /no images/i.test(err.message)) return AI_FAILURE_REASON.INCOMPLETE_STUDY;
   if (/does not support modality|no model/i.test(err.message)) return AI_FAILURE_REASON.NO_MODEL;
   return AI_FAILURE_REASON.PROCESSING_ERROR;

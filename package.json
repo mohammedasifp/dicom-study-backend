@@ -8,6 +8,8 @@
     "prod": "env-cmd -f config/prod.env node src/server.js",
     "mock-ai": "node mock-ai/server.js",
     "seed": "env-cmd -f config/dev.env node scripts/seed-radiologists.js",
+    "sim:clear": "env-cmd -f config/dev.env node scripts/clear-simulation.js",
+    "import-study": "env-cmd -f config/dev.env node scripts/import-study.js",
     "lint": "eslint ."
   },
   "keywords": [],

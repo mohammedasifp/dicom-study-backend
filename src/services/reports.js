@@ -4,9 +4,10 @@ import Study from "../models/Study.js";
 import ReportImage from "../models/ReportImage.js";
 import { isValidObjectId } from "mongoose";
 import { emit } from "./events.js";
-import { TAGS, STUDY_STATUS } from "../constants/tags.js";
+import { TAGS, STUDY_STATUS, NO_AI_DISCLAIMER } from "../constants/tags.js";
 import { HttpError } from "../utils/http.js";
 import { computeAuthorship } from "../utils/authorship.js";
+import { renderReportPdf, PDF_OPTIONS } from "./reportPdf.js";
 
 const DECISION_TAGS = {
   accepted: TAGS.SUGGESTION_ACCEPTED,
@@ -22,8 +23,21 @@ export async function getReport(studyInstanceUid) {
   return report;
 }
 
+export async function getOrCreateReport(studyInstanceUid) {
+  const existing = await Report.findOne({ studyInstanceUid });
+  if (existing) return existing;
+  const study = await Study.findOne({ studyInstanceUid }, "_id patient").lean();
+  if (!study) throw new HttpError(404, "Study not found");
+  const empty = { text: "", source: "reviewer" };
+  return Report.findOneAndUpdate(
+    { studyInstanceUid },
+    { $setOnInsert: { studyInstanceUid, study: study._id, patient: study.patient, suggestions: [], findings: empty, impression: empty, disclaimer: NO_AI_DISCLAIMER, status: "draft" } },
+    { upsert: true, new: true }
+  );
+}
+
 async function getDraft(studyInstanceUid) {
-  const report = await getReport(studyInstanceUid);
+  const report = await getOrCreateReport(studyInstanceUid);
   if (report.status === "final") throw new HttpError(409, "Report already finalised");
   return report;
 }
@@ -151,65 +165,16 @@ export async function getReportImage(studyInstanceUid, imageId) {
   return image;
 }
 
-const SOURCE_LABEL = { ai: "AI-generated", reviewer_edited: "AI-generated, edited by reviewer", reviewer: "Written by reviewer" };
-
 export async function writePdf(studyInstanceUid, res) {
-  const report = await getReport(studyInstanceUid);
+  const report = await getOrCreateReport(studyInstanceUid);
   const study = await Study.findOne({ studyInstanceUid }).populate("patient").lean();
-  const isFinal = report.status === "final";
+  if (!study) throw new HttpError(404, "Study not found");
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="report-${studyInstanceUid}.pdf"`);
-  const doc = new PDFDocument({ margin: 50 });
+  const doc = new PDFDocument(PDF_OPTIONS);
   doc.pipe(res);
-
-  doc.fontSize(16).text(isFinal ? "FINAL REVIEWED DRAFT" : "DRAFT - NOT REVIEWED", { align: "center" });
-  doc.moveDown(0.5).fontSize(9).fillColor("red").text(report.disclaimer, { align: "center" }).fillColor("black");
-
-  doc.moveDown().fontSize(11);
-  doc.text(`Patient: ${study?.patient?.name || "-"} (${study?.patient?.patientId || "-"})   Accession: ${study?.accessionNumber || "-"}`);
-  doc.text(`Modality: ${study?.modality || "-"}   Body part: ${study?.bodyPart || "-"}   Study date: ${study?.studyDate || "-"}`);
-  doc.text(`Study Instance UID: ${studyInstanceUid}`);
-  doc.text(`AI model: ${report.model?.name || "-"} (${report.model?.id || "-"} v${report.model?.version || "-"})`);
-  if (isFinal) doc.text(`Reviewed by: ${report.reviewer} on ${report.finalisedAt.toISOString()}`);
-  if (report.computedAuthorship?.totalWords) {
-    const { aiPercent, humanPercent, aiWords, totalWords } = report.computedAuthorship;
-    doc.text(`Authorship, measured: AI ${aiPercent}% / reviewer ${humanPercent}% (${aiWords} of ${totalWords} words from AI)`);
-  }
-  if (report.authorship?.aiPercent !== undefined) {
-    const { aiPercent, humanPercent, source } = report.authorship;
-    doc.text(`Authorship, reported: AI ${aiPercent}% / reviewer ${humanPercent}%${source ? ` (from ${source})` : ""}`);
-  }
-
-  doc.moveDown().fontSize(13).text("Observations");
-  doc.fontSize(10);
-  for (const s of report.suggestions) {
-    if (s.decision === "discarded") continue;
-    const text = s.decision === "edited" ? s.reviewerText : s.aiText;
-    const label = s.decision === "edited" ? "AI, edited by reviewer" : s.decision === "accepted" ? "AI, accepted" : "AI, pending review";
-    const image = s.instance ? `; series ${s.series}, image ${s.instance}` : "";
-    doc.text(`- ${text}  [${label}; confidence ${s.confidence ?? "-"}${image}]`);
-  }
-  const discarded = report.suggestions.filter((s) => s.decision === "discarded").length;
-  if (discarded) doc.fillColor("gray").text(`${discarded} AI suggestion(s) discarded by reviewer.`).fillColor("black");
-
-  for (const [title, section] of [["Findings", report.findings], ["Impression", report.impression]]) {
-    doc.moveDown().fontSize(13).text(`${title}  (${SOURCE_LABEL[section?.source] || "-"})`);
-    doc.fontSize(10).text(section?.text || "-");
-  }
-
-  doc.moveDown().fontSize(13).text("Uncertainty and limitations");
-  doc.fontSize(10).text(report.uncertainty || "-");
-  for (const l of report.limitations || []) doc.text(`- ${l}`);
-
-  doc.moveDown().fontSize(13).text("Source images");
-  doc.fontSize(8);
-  for (const se of study?.series || []) {
-    doc.text(`Series ${se.seriesInstanceUid} (${se.modality}, ${se.instances.length} instances)`);
-    const rois = (study.ai?.rois || []).filter((r) => se.instances.some((i) => i.sopInstanceUid === r.sopInstanceUid));
-    for (const r of rois) doc.text(`   ROI for ${r.observationId} on instance ${r.sopInstanceUid}: x=${r.x} y=${r.y} w=${r.width} h=${r.height}`);
-  }
-
+  await renderReportPdf(doc, { report, study });
   doc.end();
   await emit(TAGS.REPORT_EXPORTED, studyInstanceUid, { actor: "reviewer", payload: { status: report.status } });
 }

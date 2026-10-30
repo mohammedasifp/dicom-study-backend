@@ -3,10 +3,11 @@ import { isValidObjectId } from "mongoose";
 import Study from "../models/Study.js";
 import { syncFromOrthanc, getStudy, startAnalysis, retryStudy, rollbackAi, markViewed, setSla, assignRadiologist, deleteStudy, summary, reviewCounts, viewerUrl, DEFAULT_MODE } from "../services/studies.js";
 import multer from "multer";
-import { getReport, decideSuggestion, saveReport, finaliseReport, reopenReport, addReportImage, getReportImage, writePdf, MAX_IMAGE_BYTES } from "../services/reports.js";
+import { getOrCreateReport, decideSuggestion, saveReport, finaliseReport, reopenReport, addReportImage, getReportImage, writePdf, MAX_IMAGE_BYTES } from "../services/reports.js";
 import { AI_MODES } from "../constants/tags.js";
 import { ok, HttpError } from "../utils/http.js";
 import { actorName } from "../utils/auth.js";
+import { assertPromptAllowed } from "../services/promptGuard.js";
 
 const router = Router();
 const MAX_PROMPT = 2000;
@@ -22,6 +23,7 @@ function pickMode(value) {
 function pickPrompt(value) {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string" || value.length > MAX_PROMPT) throw new HttpError(400, `prompt must be text of at most ${MAX_PROMPT} characters`);
+  assertPromptAllowed(value);
   return value.trim();
 }
 
@@ -67,7 +69,7 @@ router.put("/:uid/assignment", async (req, res) => {
 
 router.get("/:uid/report", async (req, res) => {
   const study = await getStudy(req.params.uid);
-  const report = await getReport(req.params.uid);
+  const report = await getOrCreateReport(req.params.uid);
   return ok(res, { study: summary(study), ai: study.ai, report });
 });
 

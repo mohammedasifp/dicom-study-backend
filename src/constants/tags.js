@@ -64,5 +64,7 @@ export const SUPPORTED_MODALITIES = ["CR", "DX", "CT", "MR", "US"];
 
 export const AI_MODES = ["stream", "chunk"];
 
+export const NO_AI_DISCLAIMER = "AI analysis failed for this study. The radiologist wrote this report without an AI draft.";
+
 export const DISCLAIMER =
   "AI-generated draft for review only. Not a verified diagnosis. A qualified radiologist must review all clinical content.";
