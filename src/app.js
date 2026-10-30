@@ -6,10 +6,11 @@ import mongoose from "mongoose";
 import studiesRouter from "./routes/studies.js";
 import eventsRouter from "./routes/events.js";
 import patientsRouter from "./routes/patients.js";
-import radiologistsRouter, { currentRadiologist } from "./routes/radiologists.js";
+import radiologistsRouter, { authRouter, currentRadiologist } from "./routes/radiologists.js";
 import { listModels } from "./services/aiClient.js";
 import { ingestPushedStudy } from "./services/studies.js";
 import { ok, HttpError } from "./utils/http.js";
+import { identify } from "./utils/auth.js";
 
 const app = express();
 
@@ -31,6 +32,8 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", db: mongoose.connection.readyState === 1 ? "up" : "down" });
 });
 
+app.use("/api/auth", authRouter);
+app.use("/api", identify);
 app.use("/api/studies", studiesRouter);
 app.use("/api/events", eventsRouter);
 app.use("/api/patients", patientsRouter);

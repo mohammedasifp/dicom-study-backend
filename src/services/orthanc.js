@@ -2,6 +2,7 @@ const ORTHANC_URL = process.env.ORTHANC_URL || "http://localhost:8042";
 const AUTH =
   process.env.ORTHANC_USERNAME &&
   "Basic " + Buffer.from(`${process.env.ORTHANC_USERNAME}:${process.env.ORTHANC_PASSWORD || ""}`).toString("base64");
+console.log(`[ORTHANC] ${ORTHANC_URL}, basic auth ${AUTH ? "set" : "not set"}`);
 
 async function get(path, headers = {}) {
   const res = await fetch(`${ORTHANC_URL}${path}`, { headers: AUTH ? { ...headers, Authorization: AUTH } : headers });

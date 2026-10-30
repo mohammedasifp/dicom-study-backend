@@ -80,6 +80,7 @@ const studySchema = new mongoose.Schema(
     modality: String,
     bodyPart: String,
     studyDate: String,
+    studyTime: String,
     description: String,
     referringPhysician: String,
     clinicalHistory: String,

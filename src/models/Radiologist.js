@@ -4,6 +4,8 @@ import { SUPPORTED_MODALITIES } from "../constants/tags.js";
 const radiologistSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
+    username: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
+    passwordHash: { type: String, select: false },
     email: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
     designation: String,
     subspecialty: String,

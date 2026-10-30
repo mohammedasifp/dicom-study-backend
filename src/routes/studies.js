@@ -6,9 +6,11 @@ import multer from "multer";
 import { getReport, decideSuggestion, saveReport, finaliseReport, reopenReport, addReportImage, getReportImage, writePdf, MAX_IMAGE_BYTES } from "../services/reports.js";
 import { AI_MODES } from "../constants/tags.js";
 import { ok, HttpError } from "../utils/http.js";
+import { actorName } from "../utils/auth.js";
 
 const router = Router();
 const MAX_PROMPT = 2000;
+const withReviewer = (req) => ({ ...req.body, reviewer: actorName(req, req.body?.reviewer) });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } });
 
 function pickMode(value) {
@@ -48,13 +50,13 @@ router.post("/:id/retry", async (req, res) =>
   ok(res, await retryStudy(req.params.id, { mode: pickMode(req.body?.mode), model: req.body?.model || undefined, prompt: pickPrompt(req.body?.prompt) }), "retry started", 202)
 );
 
-router.post("/:uid/ai/rollback", async (req, res) => ok(res, await rollbackAi(req.params.uid, req.body || {}), "rolled back"));
+router.post("/:uid/ai/rollback", async (req, res) => ok(res, await rollbackAi(req.params.uid, { ...req.body, rolledBackBy: actorName(req, req.body?.rolledBackBy) }), "rolled back"));
 
-router.put("/:uid/viewed", async (req, res) => ok(res, await markViewed(req.params.uid, req.body?.viewedBy)));
+router.put("/:uid/viewed", async (req, res) => ok(res, await markViewed(req.params.uid, actorName(req, req.body?.viewedBy))));
 
-router.put("/:uid/sla", async (req, res) => ok(res, await setSla(req.params.uid, req.body || {}), "sla set"));
+router.put("/:uid/sla", async (req, res) => ok(res, await setSla(req.params.uid, { ...req.body, setBy: actorName(req, req.body?.setBy) }), "sla set"));
 
-router.put("/:uid/assignment", async (req, res) => ok(res, await assignRadiologist(req.params.uid, req.body || {}), "radiologist assigned"));
+router.put("/:uid/assignment", async (req, res) => ok(res, await assignRadiologist(req.params.uid, { ...req.body, assignedBy: actorName(req, req.body?.assignedBy) }), "radiologist assigned"));
 
 router.get("/:uid/report", async (req, res) => {
   const study = await getStudy(req.params.uid);
@@ -62,15 +64,15 @@ router.get("/:uid/report", async (req, res) => {
   return ok(res, { study: summary(study), ai: study.ai, report });
 });
 
-router.put("/:uid/report", async (req, res) => ok(res, await saveReport(req.params.uid, req.body || {}), "saved"));
+router.put("/:uid/report", async (req, res) => ok(res, await saveReport(req.params.uid, withReviewer(req)), "saved"));
 
 router.patch("/:uid/report/suggestions/:observationId", async (req, res) =>
-  ok(res, await decideSuggestion(req.params.uid, req.params.observationId, req.body || {}))
+  ok(res, await decideSuggestion(req.params.uid, req.params.observationId, withReviewer(req)))
 );
 
-router.post("/:uid/report/finalise", async (req, res) => ok(res, await finaliseReport(req.params.uid, req.body || {}), "finalised"));
+router.post("/:uid/report/finalise", async (req, res) => ok(res, await finaliseReport(req.params.uid, withReviewer(req)), "finalised"));
 
-router.post("/:uid/report/reopen", async (req, res) => ok(res, await reopenReport(req.params.uid, req.body || {}), "reopened"));
+router.post("/:uid/report/reopen", async (req, res) => ok(res, await reopenReport(req.params.uid, withReviewer(req)), "reopened"));
 
 router.post("/:uid/report/images", upload.single("file"), async (req, res) =>
   ok(res, await addReportImage(req.params.uid, { file: req.file, dataUrl: req.body?.dataUrl }), "image stored", 201)
