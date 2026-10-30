@@ -1,0 +1,37 @@
+{
+  "name": "dicom-study-backend",
+  "version": "1.0.0",
+  "description": "Backend for the See Better AI radiology co-pilot",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "env-cmd -f config/dev.env nodemon src/server.js",
+    "prod": "env-cmd -f config/prod.env node src/server.js",
+    "mock-ai": "node mock-ai/server.js",
+    "lint": "eslint ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "env-cmd": "^10.1.0",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "mongoose": "^9.11.4",
+    "morgan": "^1.12.1",
+    "multer": "^2.5.0",
+    "pdfkit": "^0.20.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "nodemon": "^3.1.14"
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "mock-ai/*"
+    ]
+  }
+}
