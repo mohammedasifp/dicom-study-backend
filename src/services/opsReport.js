@@ -4,7 +4,7 @@ import OpsException from "../models/OpsException.js";
 import Study from "../models/Study.js";
 import { exceptionView } from "./opsExceptions.js";
 import { OPS_TAGS, STUDY_STATUS, TAGS } from "../constants/tags.js";
-import { CASE_STAGES, EXCEPTION_STATUS, OPS_DISCLAIMER, SEVERITIES, WORKFLOW_STAGES } from "../constants/ops.js";
+import { CASE_STAGES, DEMO_CONTROLS, EXCEPTION_STATUS, OPS_DISCLAIMER, SEVERITIES, WORKFLOW_STAGES } from "../constants/ops.js";
 
 const MINUTE = 60 * 1000;
 const FEED_SIZE = 25;
@@ -60,6 +60,7 @@ export async function opsDashboard() {
       unassigned: open.filter((e) => !e.assignee?.id).length,
     },
     feed: feed.map((e) => ({ id: String(e._id), tag: e.tag, at: e.createdAt, payload: e.payload })),
+    demoControls: DEMO_CONTROLS,
     disclaimer: OPS_DISCLAIMER,
   };
 }
@@ -82,7 +83,7 @@ function insightsFor({ raisedByType, open, resolved, slowest, sla, bottleneck })
     insights.push("Every exception raised today has been resolved.");
   }
   const unassigned = open.filter((e) => !e.assignee?.id).length;
-  if (unassigned) insights.push(`${plural(unassigned, "open exception")} still have no owner.`);
+  if (unassigned) insights.push(`${plural(unassigned, "open exception")} not assigned to anyone yet.`);
   return insights;
 }
 

@@ -137,7 +137,6 @@ async function detect(now) {
       stage: rule.stage,
       detectedAt: now,
       actions: rule.actions,
-      owner: rule.owner,
       history: [{ action: "RAISED", by: "system", at: now }],
     });
     raised += 1;
@@ -209,10 +208,10 @@ export async function acknowledgeException(id, by) {
 }
 
 export async function assignException(id, { radiologistId, by }) {
-  if (!isValidObjectId(radiologistId)) throw new HttpError(400, "radiologistId must be a staff member id");
+  if (!isValidObjectId(radiologistId)) throw new HttpError(400, "radiologistId must be a radiologist id");
   const [exception, staff] = await Promise.all([getException(id), Radiologist.findById(radiologistId)]);
-  if (!staff) throw new HttpError(404, "Staff member not found");
-  if (staff.status !== "ACTIVE") throw new HttpError(400, "Staff member is not active");
+  if (!staff) throw new HttpError(404, "Radiologist not found");
+  if (staff.status !== "ACTIVE") throw new HttpError(400, "Radiologist is not active");
   assertOpen(exception);
   const at = new Date();
   exception.assignee = { id: String(staff._id), name: staff.name };

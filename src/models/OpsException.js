@@ -22,7 +22,6 @@ const opsExceptionSchema = new mongoose.Schema(
     detectedAt: Date,
     detail: String,
     actions: [String],
-    owner: String,
     assignee: { id: String, name: String },
     assignedAt: Date,
     acknowledgedAt: Date,

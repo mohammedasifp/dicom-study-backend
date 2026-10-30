@@ -23,7 +23,6 @@ export const EXCEPTION_TYPES = {
     stage: "ACQUISITION",
     severity: "HIGH",
     escalateAfter: 90,
-    owner: "Technologist",
     actions: [
       "Check whether the patient has arrived and is in the waiting area.",
       "If the patient is here, move them into the next free slot on this modality.",
@@ -34,7 +33,6 @@ export const EXCEPTION_TYPES = {
     stage: "PACS_TRANSFER",
     severity: "HIGH",
     escalateAfter: 45,
-    owner: "PACS administrator",
     actions: [
       "Check the modality's send queue for failed jobs and re-send the study.",
       "Confirm the modality can reach PACS (network, AE title, port).",
@@ -45,7 +43,6 @@ export const EXCEPTION_TYPES = {
     stage: "PACS_TRANSFER",
     severity: "MEDIUM",
     escalateAfter: 40,
-    owner: "Technologist",
     actions: [
       "Re-send the missing series from the modality.",
       "Check the modality log for transfer errors.",
@@ -56,7 +53,6 @@ export const EXCEPTION_TYPES = {
     stage: "PACS_TRANSFER",
     severity: "CRITICAL",
     escalateAfter: 30,
-    owner: "Front desk",
     actions: [
       "Do not report this study until the patient's identity is confirmed.",
       "Check the patient ID and name against the registration record and the modality worklist entry.",
@@ -67,7 +63,6 @@ export const EXCEPTION_TYPES = {
     stage: "REPORTING",
     severity: "MEDIUM",
     escalateAfter: 60,
-    owner: "Reporting radiologist",
     actions: [
       "Check that the study is assigned to a radiologist who is on shift.",
       "Reassign it if the assigned radiologist is busy.",
@@ -78,7 +73,6 @@ export const EXCEPTION_TYPES = {
     stage: "REPORTING",
     severity: "HIGH",
     escalateAfter: 60,
-    owner: "Reporting radiologist",
     actions: [
       "Ask the assigned radiologist for an expected completion time.",
       "Reassign to a radiologist with capacity.",
@@ -89,7 +83,6 @@ export const EXCEPTION_TYPES = {
     stage: "DELIVERY",
     severity: "LOW",
     escalateAfter: 120,
-    owner: "Front desk",
     actions: [
       "Check the delivery channel (WhatsApp, email or print counter) for a failed send.",
       "Send the report again, or hand it over at the desk.",
@@ -99,6 +92,8 @@ export const EXCEPTION_TYPES = {
 };
 
 export const DEFAULT_INJECTIONS = ["MISSED_SCAN", "PACS_TRANSFER_STUCK", "ID_MISMATCH", "NOT_VIEWED", "REPORT_OVERDUE"];
+
+export const DEMO_CONTROLS = process.env.OPS_DEMO_CONTROLS === "true";
 
 export const OPS_DISCLAIMER =
   "Suggested actions only. Staff review each one and decide what to do. Nothing is changed automatically.";
