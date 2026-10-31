@@ -368,14 +368,17 @@ Severity goes up one level for STAT, and one more once the problem is older than
   - Each finding becomes an observation (`obs-1`, `obs-2`, ...) with `section`, `title`, `confidence`, `limitation`, `series` and `instance` (the image's real SeriesNumber, and its frame number in a multi-frame file, else its InstanceNumber) and `source` (with `frame` for a multi-frame file) (`seriesInstanceUid` and `sopInstanceUid` of that image).
   - The draft report's suggestions carry the same fields, so the webapp can open the right image. The PDF prints "Series S · image N" next to the confidence.
   - `findings` is `""`. `uncertainty` comes from the model, else "Not stated by the model."
-  - No ROIs.
+  - **ROIs** (added 31/10/26): the prompt asks for an optional `box` per finding, `[ymin, xmin, ymax, xmax]` from 0 to 1000 inside that image's grid cell. No extra request: it is part of the same reply, about 15 output tokens per finding.
+    - Accepted: 4 numbers (0 to 1 values are read as fractions), at least 1% and at most half of the cell each way (a bigger box points at nothing useful and is dropped). The prompt asks for a tight box around only the abnormal spot, usually under 200 × 200. Also read from `box_2d`. Boxes on impression points are ignored.
+    - The backend maps the cell box onto the image inside the cell (the cell is letterboxed) and stores an `ellipse` ROI in `ai.rois`: `{ observationId, sopInstanceUid, shape, x, y, width, height, imageWidth, imageHeight }`, in pixels of the image as the model saw it. The webapp scales it to any render size, the same way as the mock's ROIs.
+    - The observation gets `localizable: true`. A limitation line says the marked regions are the model's rough estimate.
   - `limitations` say how many of the study's images the model saw, the cell size and the number of grid pictures. A retry prompt is added there too.
 - **Failure reason** (changed 30/10/26): an `AI_FAILED` study also gets `ai.failureReason`. `INCOMPLETE_STUDY`: the study has no instances, or no images could be sent. `NO_MODEL`: no model supports the modality. `PROCESSING_ERROR`: anything else. `OUT_OF_SCOPE` exists for the webapp but is never set: a study with no supported modality is rejected at ingest and never listed.
 - **Errors** (the study becomes `AI_FAILED`):
   - No key: "AI_API_KEY is not set"
   - dr7 replies non-2xx: "dr7 <status>: <body>". A key below the model's tier gets a 402 or 403 style error.
   - Orthanc cannot render an image: the Orthanc error, for example `415`
-- **Limits:** the model sees at most 18 images by default, as small renders, not the full DICOM data. No ROIs.
+- **Limits:** the model sees at most 18 images by default, as small renders, not the full DICOM data. Its regions are rough boxes on those small renders.
 
 ## AI API contract (mock provider)
 

@@ -52,14 +52,21 @@ export async function buildTiles(images, grid, render = getRenderedJpeg) {
     const cols = Math.min(group.length, grid);
     const rows = Math.ceil(group.length / grid);
     const cells = await Promise.all(
-      group.map(async (image, i) => ({
-        input: await sharp(Buffer.from(await render(image.orthancId, cell, image.frame)))
-          .resize(cell, cell, { fit: "contain", background: "#000" })
-          .composite([{ input: numberLabel(start + i + 1), top: 0, left: 0 }])
-          .toBuffer(),
-        left: (i % grid) * (cell + GAP_PX),
-        top: Math.floor(i / grid) * (cell + GAP_PX),
-      }))
+      group.map(async (image, i) => {
+        const rendered = sharp(Buffer.from(await render(image.orthancId, cell, image.frame)));
+        const { width, height } = await rendered.metadata();
+        const scale = Math.min(cell / width, cell / height);
+        const shown = { width: Math.round(width * scale), height: Math.round(height * scale) };
+        image.view = { cell, ...shown, left: Math.floor((cell - shown.width) / 2), top: Math.floor((cell - shown.height) / 2) };
+        return {
+          input: await rendered
+            .resize(cell, cell, { fit: "contain", background: "#000" })
+            .composite([{ input: numberLabel(start + i + 1), top: 0, left: 0 }])
+            .toBuffer(),
+          left: (i % grid) * (cell + GAP_PX),
+          top: Math.floor(i / grid) * (cell + GAP_PX),
+        };
+      })
     );
     const jpeg = await sharp({
       create: { width: cols * cell + (cols - 1) * GAP_PX, height: rows * cell + (rows - 1) * GAP_PX, channels: 3, background: GAP_COLOR },
