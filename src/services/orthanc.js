@@ -43,6 +43,7 @@ export async function getInstanceFile(orthancInstanceId) {
   return (await get(`/instances/${orthancInstanceId}/file`)).arrayBuffer();
 }
 
-export async function getRenderedJpeg(orthancInstanceId, size = 768) {
-  return (await get(`/instances/${orthancInstanceId}/rendered?width=${size}&height=${size}`, { Accept: "image/jpeg" })).arrayBuffer();
+export async function getRenderedJpeg(orthancInstanceId, size = 768, frame) {
+  const path = frame ? `/instances/${orthancInstanceId}/frames/${frame - 1}/rendered` : `/instances/${orthancInstanceId}/rendered`;
+  return (await get(`${path}?width=${size}&height=${size}`, { Accept: "image/jpeg" })).arrayBuffer();
 }

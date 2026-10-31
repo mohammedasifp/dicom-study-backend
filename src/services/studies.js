@@ -101,6 +101,7 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series, insta
       instances: s.instances.map((i) => ({
         sopInstanceUid: i.MainDicomTags.SOPInstanceUID,
         instanceNumber: Number(i.MainDicomTags.InstanceNumber) || undefined,
+        frames: Number(i.MainDicomTags.NumberOfFrames) || 1,
         orthancId: i.ID,
       })),
     })),
@@ -108,14 +109,15 @@ async function saveOrthancStudy(orthancId, { study: o, patient: p, series, insta
   await study.save();
 
   const instanceCount = study.series.reduce((n, s) => n + s.instances.length, 0);
+  const imageCount = study.series.reduce((n, s) => n + s.instances.reduce((f, i) => f + (i.frames || 1), 0), 0);
   await emit(TAGS.STUDY_RECEIVED, uid, {
     actor: "server",
-    payload: { orthancId, modality: study.modality, seriesCount: study.series.length, instanceCount, isNew },
+    payload: { orthancId, modality: study.modality, seriesCount: study.series.length, instanceCount, imageCount, isNew },
   });
   const started = isNew && autoAnalyze ? await startAnalysis(uid, DEFAULT_MODE, { auto: true }) : null;
   console.log(
     `[ORTHANC] ${source}: study ${uid} ${isNew ? "created" : "updated"}: ${personName(pt.PatientName) || "unknown"} (${pt.PatientID}), ${study.modality}, ` +
-      `${study.series.length} series / ${instanceCount} instances${started?.status === STUDY_STATUS.AI_PROCESSING ? "; AI analysis started" : ""}`
+      `${study.series.length} series / ${instanceCount} instances / ${imageCount} images${started?.status === STUDY_STATUS.AI_PROCESSING ? "; AI analysis started" : ""}`
   );
   return { studyInstanceUid: uid, result: isNew ? "created" : "updated", status: started?.status ?? study.status };
 }

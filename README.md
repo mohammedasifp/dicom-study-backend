@@ -66,6 +66,8 @@ MongoDB creates the database and its collections when the first study arrives fr
 | `AI_MIN_CREDIT_USD` | `1` | dr7 only: refuse new analyses when dr7's remaining credit falls below this |
 | `DR7_MAX_TOKENS` | `2000` | `max_tokens` per dr7 call. 800 was too low: replies were cut off mid-JSON. |
 | `DR7_TIMEOUT_MS` | `120000` | Timeout per dr7 call |
+| `DR7_TILE_GRID` | `3` | Images per side of one grid picture sent to dr7 (1 to 4). 3 means up to 9 images per picture. |
+| `DR7_MAX_TILES` | `2` | Grid pictures per dr7 analysis (1 to 4). With the defaults the model sees up to 18 images. |
 | `AI_API_KEY` | (none) | dr7.ai API key, sent as a Bearer token. Required when `AI_PROVIDER=dr7`. Keep it in `config/dev.env` only. |
 | `DR7_BASE_URL` | `https://dr7.ai/api/v1/medical` | dr7.ai base URL. The backend calls `<base>/chat/completions` and `<base>/models`. |
 | `AI_BASE_URL` | `http://localhost:4100` | AI API base URL (mock provider) |
@@ -124,6 +126,7 @@ Changed 30/10/26. `/ohif`, `/dicom-web` and `/wado` are forwarded to Orthanc (`O
 - `GET` and `HEAD` only. Other methods: `405`. So STOW (upload) is not possible through the proxy; upload in Orthanc Explorer 2 instead.
 - Mounted before `helmet`, so Orthanc's own headers reach OHIF unchanged.
 - Sends `Forwarded: host=<browser host>;proto=<proto>` (from `X-Forwarded-Host` when a proxy such as Vite sits in front). Orthanc builds its DICOMweb links from it.
+- A `/rendered` URL is always requested as `Accept: image/jpeg`. Orthanc's DICOMweb answers `400` to a browser image request (`image/*`), and the webapp shows multi-frame findings through `/dicom-web/.../frames/<n>/rendered`.
 
 Test accounts: `npm run seed` (`scripts/seed-radiologists.js`) upserts 4 radiologists by username. Changed 30/10/26:
 
@@ -281,7 +284,7 @@ Changed 30/10/26. Code: `src/services/aiGuard.js`. Checked before every analysis
 - `AI_MAX_CONCURRENT` analyses running: `429`. A run older than 15 minutes is treated as stale and not counted.
 - Counts come from the `AI_REQUESTED` events, so they survive a restart.
 - A blocked **automatic** analysis (a new study from Orthanc) does not fail the push: the study becomes `AI_FAILED` with the reason as `ai.error`, and the radiologist can report manually or run the AI later.
-- Also: prompts at most 2000 characters, at most 4 images per dr7 analysis, `DR7_MAX_TOKENS` and `DR7_TIMEOUT_MS` per call.
+- Also: prompts at most 2000 characters, at most `DR7_TILE_GRID`² × `DR7_MAX_TILES` images per dr7 analysis (18 by default), `DR7_MAX_TOKENS` and `DR7_TIMEOUT_MS` per call.
 
 ## Operations (simulated centre and exceptions)
 
@@ -327,9 +330,14 @@ Severity goes up one level for STAT, and one more once the problem is older than
 
 ### dr7 provider
 
-- **Images:** one image per series, the middle instance by InstanceNumber. At most 4 series.
-  - Each image is a JPEG render from Orthanc: `GET /instances/<id>/rendered?width=768&height=768`.
-  - It is sent as a base64 data URL.
+- **Images** (changed 31/10/26, was one middle image from each of at most 4 series): code `src/services/imageTiles.js`.
+  - An image is one frame. A multi-frame file (Enhanced MR/CT, one file per series) counts as many images as it has frames; each instance stores `frames` (DICOM NumberOfFrames, 1 for a normal file).
+  - Budget: `DR7_TILE_GRID`² × `DR7_MAX_TILES` images, 18 by default. A study with fewer images sends them all.
+  - Every series with images gets at least one, then the rest go to the series with the most images per pick. With more series than the budget, the first series are used.
+  - Within a series the picks are spread evenly by InstanceNumber and frame, so a 300-slice CT is sampled across its length, not just the middle.
+  - Each image is a JPEG render from Orthanc at cell size: `GET /instances/<id>/rendered?width=<cell>&height=<cell>` (253 px for a 3×3 grid), or `/instances/<id>/frames/<n-1>/rendered` for a frame.
+  - The images are packed into grid pictures of about 768 px, left to right, then top to bottom, with grey 4 px borders. Each cell has its image number (1, 2, 3, ... across all pictures) in the top-left corner.
+  - Each grid picture is sent as one base64 JPEG data URL, so 18 images cost about as much as 2 images did before.
 - **Model list:** `GET <base>/models` with the Bearer key. The docs page names "List Models" but gives no path; the path was found by probing.
   - It returns 18 models, each with `id`, `category`, `supports_image` and `min_tier`.
   - The backend caches the list for 10 minutes.
@@ -342,33 +350,32 @@ Severity goes up one level for STAT, and one more once the problem is older than
   - The user picks a model with `POST /api/studies/:id/retry` `{ "model": "..." }`.
   - The retry checks that the model is in the list and supports the study's modality. Otherwise `400`, for example "Model medgemma-4b-it does not support modality CR".
 - **Prompt:**
-  - The images are labelled "Image 1:", "Image 2:", ... All images are series 1. The image number is the instance number.
+  - Each grid picture is labelled "Images 1 to 9:", "Images 10 to 14:", ... The prompt explains the grid, says the borders and numbers are not part of the scan, and asks for the image number that shows each finding best.
   - It adds the modality and the body part. A retry prompt is added as "Additional instruction".
-  - The model must reply with JSON only: `{"observations":[{"section","title","text","series":1,"instance":<image number>,"confidence":0-1,"limitation"}],"uncertainty"}`.
+  - The model must reply with JSON only: `{"observations":[{"section","title","text","instance":<image number>,"confidence":0-1,"limitation"}],"uncertainty"}`.
   - `section` is `findings` or `impression`. Each impression point is its own observation. `title` is at most 40 characters.
-- **Stream mode:** one request with all the chosen images, streamed. Each finished line of text is recorded as an `AI_STREAM_CHUNK` event, `{ type: "text", data: <line> }`.
-- **Chunk mode:** one request per image, not streamed. One `AI_CHUNK_SENT` event per image, `{ index, totalChunks, instances: 1 }`.
+- **Stream mode:** one request with all the grid pictures, streamed. Each finished line of text is recorded as an `AI_STREAM_CHUNK` event, `{ type: "text", data: <line> }`.
+- **Chunk mode:** one request per grid picture, not streamed. One `AI_CHUNK_SENT` event per picture, `{ index, totalChunks, instances: <images in it> }`.
 - **Parsing:**
   - The JSON is read from the first `{` to the last `}`, so a ```` ```json ```` fence works.
   - `confidence` is a number from 0 to 1. A value above 1 is read as a percent (64 becomes 0.64). Any other value is dropped.
-  - `instance` must be from 1 to the number of images sent. Otherwise it is empty. When only one image was sent, an observation without an instance uses image 1.
+  - `instance` must be an image number in the request (1 to the number of images in stream mode, that picture's numbers in chunk mode). Otherwise it is empty. When the request had one image, an observation without an instance uses it.
   - An old-style `impression` string becomes one observation with section `impression` and title "Impression".
   - `title` is cut to 40 characters.
-  - In chunk mode, `instance` is always the number of the image in that request.
   - An answer that is not valid JSON: each line becomes a finding with no confidence. A limitation line says how many answers were not JSON.
   - Duplicate text in the same section is removed. The first one is kept.
 - **Result mapping:**
-  - Each finding becomes an observation (`obs-1`, `obs-2`, ...) with `section`, `title`, `confidence`, `limitation`, `series` (1), `instance` and `source` (`seriesInstanceUid` and `sopInstanceUid` of that image).
-  - The draft report's suggestions carry the same fields, so the webapp can open the right image. The PDF prints "series 1, image N" next to the confidence.
+  - Each finding becomes an observation (`obs-1`, `obs-2`, ...) with `section`, `title`, `confidence`, `limitation`, `series` and `instance` (the image's real SeriesNumber, and its frame number in a multi-frame file, else its InstanceNumber) and `source` (with `frame` for a multi-frame file) (`seriesInstanceUid` and `sopInstanceUid` of that image).
+  - The draft report's suggestions carry the same fields, so the webapp can open the right image. The PDF prints "Series S · image N" next to the confidence.
   - `findings` is `""`. `uncertainty` comes from the model, else "Not stated by the model."
   - No ROIs.
-  - `limitations` say how many of the study's images the model saw, and that they were 768 px JPEG renders. A retry prompt is added there too.
+  - `limitations` say how many of the study's images the model saw, the cell size and the number of grid pictures. A retry prompt is added there too.
 - **Failure reason** (changed 30/10/26): an `AI_FAILED` study also gets `ai.failureReason`. `INCOMPLETE_STUDY`: the study has no instances, or no images could be sent. `NO_MODEL`: no model supports the modality. `PROCESSING_ERROR`: anything else. `OUT_OF_SCOPE` exists for the webapp but is never set: a study with no supported modality is rejected at ingest and never listed.
 - **Errors** (the study becomes `AI_FAILED`):
   - No key: "AI_API_KEY is not set"
   - dr7 replies non-2xx: "dr7 <status>: <body>". A key below the model's tier gets a 402 or 403 style error.
   - Orthanc cannot render an image: the Orthanc error, for example `415`
-- **Limits:** the model sees at most 4 images, not the full DICOM data.
+- **Limits:** the model sees at most 18 images by default, as small renders, not the full DICOM data. No ROIs.
 
 ## AI API contract (mock provider)
 

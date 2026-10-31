@@ -5,6 +5,7 @@ const instanceSchema = new mongoose.Schema(
   {
     sopInstanceUid: { type: String, required: true },
     instanceNumber: Number,
+    frames: Number,
     orthancId: { type: String, required: true },
   },
   { _id: false }
@@ -38,7 +39,7 @@ const roiSchema = new mongoose.Schema(
   { _id: false }
 );
 
-export const imageSourceSchema = new mongoose.Schema({ seriesInstanceUid: String, sopInstanceUid: String }, { _id: false });
+export const imageSourceSchema = new mongoose.Schema({ seriesInstanceUid: String, sopInstanceUid: String, frame: Number }, { _id: false });
 
 const observationSchema = new mongoose.Schema(
   {

@@ -8,6 +8,8 @@ const FORWARD_RESPONSE = ["content-type", "content-range", "accept-ranges", "eta
 export async function orthancProxy(req, res) {
   if (!["GET", "HEAD"].includes(req.method)) throw new HttpError(405, "Only reads are allowed through the image proxy");
   const headers = Object.fromEntries(FORWARD_REQUEST.filter((h) => req.get(h)).map((h) => [h, req.get(h)]));
+  // Orthanc's DICOMweb answers 400 to a browser <img> Accept header (image/*) on /rendered.
+  if (/\/rendered(\?|$)/.test(req.originalUrl)) headers.accept = "image/jpeg";
   if (ORTHANC_AUTH) headers.authorization = ORTHANC_AUTH;
   headers.forwarded = `host=${req.get("X-Forwarded-Host") || req.get("Host")};proto=${req.get("X-Forwarded-Proto") || req.protocol}`;
 
