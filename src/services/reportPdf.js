@@ -286,7 +286,7 @@ export async function renderReportPdf(doc, { report, study, exportedAt = new Dat
     { width: w }
   );
   doc.moveDown(0.6).font("Helvetica").fontSize(8).fillColor(MUTED);
-  if (final && disclaimer) doc.text(disclaimer, left, doc.y, { width: w });
+  // if (final && disclaimer) doc.text(disclaimer, left, doc.y, { width: w });
   doc.text(`Exported ${dateTime(exportedAt)} · Study UID ${report.studyInstanceUid}`, left, doc.y + 2, { width: w });
 }
 
