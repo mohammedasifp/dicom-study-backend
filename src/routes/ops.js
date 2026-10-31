@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { opsDashboard, opsSummary } from "../services/opsReport.js";
+import { opsDashboard, opsSummary, stagePatients } from "../services/opsReport.js";
 import { injectFaults, startSimulation } from "../services/simulator.js";
 import { acknowledgeException, assignException, resolveException } from "../services/opsExceptions.js";
 import { DEMO_CONTROLS } from "../constants/ops.js";
@@ -16,6 +16,7 @@ function demoOnly(req, res, next) {
 
 router.get("/dashboard", async (req, res) => ok(res, await opsDashboard()));
 router.get("/summary", async (req, res) => ok(res, await opsSummary()));
+router.get("/stages/:stage", async (req, res) => ok(res, await stagePatients(req.params.stage)));
 
 router.post("/simulation/start", demoOnly, async (req, res) => ok(res, await startSimulation({ count: req.body?.count, by: by(req) }), "started"));
 router.post("/simulation/inject", demoOnly, async (req, res) => ok(res, await injectFaults({ types: req.body?.types, by: by(req) }), "injected"));

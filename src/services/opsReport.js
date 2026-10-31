@@ -1,8 +1,10 @@
 import CentreCase from "../models/CentreCase.js";
 import Event from "../models/Event.js";
 import OpsException from "../models/OpsException.js";
+import "../models/Patient.js";
 import Study from "../models/Study.js";
-import { exceptionView } from "./opsExceptions.js";
+import { displayName, exceptionView } from "./opsExceptions.js";
+import { HttpError } from "../utils/http.js";
 import { OPS_TAGS, STUDY_STATUS, TAGS } from "../constants/tags.js";
 import { CASE_STAGES, DEMO_CONTROLS, EXCEPTION_STATUS, OPS_DISCLAIMER, SEVERITIES, WORKFLOW_STAGES } from "../constants/ops.js";
 
@@ -10,6 +12,9 @@ const MINUTE = 60 * 1000;
 const FEED_SIZE = 25;
 const OPEN_STATUSES = [EXCEPTION_STATUS.OPEN, EXCEPTION_STATUS.ACKNOWLEDGED];
 const STATUS_ORDER = { OPEN: 0, ACKNOWLEDGED: 1, RESOLVED: 2 };
+const STAGE_SINCE = { REGISTERED: "registeredAt", ACQUIRED: "acquiredAt", IN_PACS: "pacsAt", REPORTED: "reportedAt", DELIVERED: "deliveredAt" };
+const PRIORITY_ORDER = { STAT: 0, URGENT: 1, ROUTINE: 2 };
+const MAX_STAGE_PATIENTS = 300;
 const FEED_TAGS = OPS_TAGS.filter((tag) => ![TAGS.SIM_STARTED, TAGS.SIM_FAULT_INJECTED].includes(tag));
 
 const startOfToday = () => {
@@ -40,6 +45,57 @@ async function stageCounts(openExceptions) {
     count: (caseCount[stage] || 0) + (studyCount[stage] || 0),
     openExceptions: exceptionCount[stage] || 0,
   }));
+}
+
+async function liveStudiesAt(stage) {
+  if (!["IN_PACS", "REPORTED"].includes(stage)) return [];
+  const reported = stage === "REPORTED";
+  const studies = await Study.find({ status: reported ? STUDY_STATUS.REPORTED : { $ne: STUDY_STATUS.REPORTED } })
+    .populate("patient")
+    .limit(MAX_STAGE_PATIENTS)
+    .lean();
+  return studies.map((s) => ({
+    ref: { kind: "study", id: s.studyInstanceUid },
+    patient: { patientId: s.patient?.patientId, name: displayName(s.patient?.name) },
+    accessionNumber: s.accessionNumber,
+    modality: s.modality,
+    description: s.description,
+    priority: s.priority,
+    since: (reported ? s.reportedAt : s.createdAt) || s.updatedAt,
+  }));
+}
+
+export async function stagePatients(stage) {
+  if (!CASE_STAGES.includes(stage)) throw new HttpError(400, `stage must be one of ${CASE_STAGES.join(", ")}`);
+  const [cases, live, open] = await Promise.all([
+    CentreCase.find({ stage }).limit(MAX_STAGE_PATIENTS).lean(),
+    liveStudiesAt(stage),
+    OpsException.find({ status: { $in: OPEN_STATUSES } }, "ref type severity").lean(),
+  ]);
+  const worst = new Map();
+  for (const e of open) {
+    const key = `${e.ref.kind}:${e.ref.id}`;
+    const current = worst.get(key);
+    if (!current || SEVERITIES.indexOf(e.severity) > SEVERITIES.indexOf(current.severity)) worst.set(key, { type: e.type, severity: e.severity });
+  }
+  const patients = [
+    ...cases.map((c) => ({
+      ref: { kind: "case", id: c.caseNumber },
+      patient: { patientId: c.patient.patientId, name: c.patient.name },
+      accessionNumber: c.accessionNumber,
+      modality: c.modality,
+      description: c.description,
+      priority: c.priority,
+      since: c[STAGE_SINCE[stage]],
+      scheduledAt: stage === "REGISTERED" ? c.scheduledAt : undefined,
+    })),
+    ...live,
+  ].map((p) => ({ ...p, exception: worst.get(`${p.ref.kind}:${p.ref.id}`) || null }));
+  const rank = (p) => (p.exception ? SEVERITIES.length - SEVERITIES.indexOf(p.exception.severity) : SEVERITIES.length + 1);
+  patients.sort(
+    (a, b) => rank(a) - rank(b) || PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || new Date(a.since) - new Date(b.since)
+  );
+  return { stage, patients };
 }
 
 export async function opsDashboard() {

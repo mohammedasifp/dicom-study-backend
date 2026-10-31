@@ -1,6 +1,7 @@
 import { isValidObjectId } from "mongoose";
 import CentreCase from "../models/CentreCase.js";
 import OpsException from "../models/OpsException.js";
+import "../models/Patient.js";
 import Radiologist from "../models/Radiologist.js";
 import Study from "../models/Study.js";
 import { emit } from "./events.js";
@@ -18,6 +19,7 @@ const minutesSince = (date, now) => (now - new Date(date)) / MINUTE;
 const clock = (date) => new Date(date).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TIME_ZONE });
 const letters = (name = "") => name.toLowerCase().replace(/[^a-z]/g, "");
 const dedupeKey = (kind, id, type) => `${kind}:${id}:${type}`;
+export const displayName = (name) => name?.replace(/\^+/g, " ").trim();
 
 function caseProblems(c, now) {
   const problems = [];
@@ -83,7 +85,7 @@ const studyRef = (s) => ({
   ref: { kind: "study", id: s.studyInstanceUid },
   simulated: false,
   caseStage: "IN_PACS",
-  patient: { patientId: s.patient?.patientId, name: s.patient?.name },
+  patient: { patientId: s.patient?.patientId, name: displayName(s.patient?.name) },
   accessionNumber: s.accessionNumber,
   modality: s.modality,
   description: s.description,
